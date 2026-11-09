@@ -3,7 +3,14 @@ using System.Text.Json;
 
 // Read-only inspection. Never loads or executes game code.
 if (args.Length < 1) throw new ArgumentException("Pass the installed Assembly-CSharp.dll path, optionally a metadata token.");
-using var assembly = AssemblyDefinition.ReadAssembly(args[0]);
+var resolver = new DefaultAssemblyResolver();
+resolver.AddSearchDirectory(Path.GetDirectoryName(Path.GetFullPath(args[0])));
+using var assembly = AssemblyDefinition.ReadAssembly(args[0], new ReaderParameters { AssemblyResolver = resolver });
+if (args.Length > 1 && args[1] == "locate")
+{
+    Locator.Run(assembly, args.Length > 2 ? args[2] : "GameTokens.cs", args.Length > 3 ? args[3] : "unlabelled Liftoff build");
+    return;
+}
 if (args.Length > 1)
 {
     var member = args[1].StartsWith("hash:") ? (IMetadataTokenProvider)assembly.MainModule.Types.Single(t => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(t.Name))).ToLowerInvariant().StartsWith(args[1].Substring(5))) : assembly.MainModule.LookupToken(Convert.ToInt32(args[1], 16));

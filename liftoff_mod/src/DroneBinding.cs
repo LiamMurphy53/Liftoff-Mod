@@ -8,7 +8,7 @@ namespace GoProGeometry
 {
     internal sealed class DroneBinding
     {
-        internal const string SupportedModule = "a2543f11-0d93-4fe0-8ffd-ff5ded8253a3";
+        internal const string SupportedModule = GameTokens.Module;
         internal readonly Rigidbody Body;
         internal readonly Propeller[] Props;
         internal readonly Component Controller;
@@ -39,7 +39,7 @@ namespace GoProGeometry
             var properties = state.GetType().GetProperties(Plugin.Members);
             var body = (Rigidbody)properties.Single(p => p.PropertyType == typeof(Rigidbody)).GetValue(state);
             if (!body) return null;
-            var controller = body.GetComponents<Component>().SingleOrDefault(c => c && c.GetType().MetadataToken == 0x02000e07 && c.GetType().Assembly == typeof(FlightManager).Assembly);
+            var controller = body.GetComponents<Component>().SingleOrDefault(c => c && c.GetType().MetadataToken == GameTokens.Controller && c.GetType().Assembly == typeof(FlightManager).Assembly);
             if (!controller) throw new InvalidOperationException("This prototype supports the inspected ZetaFlight controller only.");
             return new DroneBinding(fm, body, controller);
         }

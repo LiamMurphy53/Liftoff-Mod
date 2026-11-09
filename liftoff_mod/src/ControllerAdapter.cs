@@ -15,12 +15,12 @@ namespace GoProGeometry
     {
         static readonly Module Game=typeof(FlightManager).Module;
         static FieldInfo Field(int token)=>Game.ResolveField(token);
-        static readonly FieldInfo Pids=Field(0x04004261), Settings=Field(0x04004259),
-            Outputs=Field(0x04004262), Forces=Field(0x04004263), Rpm=Field(0x04004264),
-            MaxRpm=Field(0x04004267), Sign=Field(0x04004266), Storage=Field(0x0400567c),
-            Gains=Field(0x04000b60), Integral=Field(0x04000b63);
-        static readonly ConstructorInfo PidConstructor=(ConstructorInfo)Game.ResolveMethod(0x06000ed0);
-        internal static readonly MethodInfo Calculate=(MethodInfo)Game.ResolveMethod(0x06000ecf);
+        static readonly FieldInfo Pids=Field(GameTokens.Pids), Settings=Field(GameTokens.Settings),
+            Outputs=Field(GameTokens.Outputs), Forces=Field(GameTokens.Forces), Rpm=Field(GameTokens.Rpm),
+            MaxRpm=Field(GameTokens.MaxRpm), Sign=Field(GameTokens.Sign), Storage=Field(GameTokens.Storage),
+            Gains=Field(GameTokens.PidGains), Integral=Field(GameTokens.PidIntegral);
+        static readonly ConstructorInfo PidConstructor=(ConstructorInfo)Game.ResolveMethod(GameTokens.PidConstructor);
+        internal static readonly MethodInfo Calculate=(MethodInfo)Game.ResolveMethod(GameTokens.PidCalculate);
         readonly Component controller;
         readonly MotorAllocator allocator;
         readonly IDictionary original, adapted;
@@ -105,7 +105,7 @@ namespace GoProGeometry
             return PidConstructor.Invoke(new object[]{axis,new PIDGains {P=p,I=axis==TaitBryanAngle.YAW?0:2*p,D=0},.0793f/p});
         }
         internal static void InstallPatch(Harmony harmony) {
-            harmony.Patch(Game.ResolveMethod(0x06005c09),
+            harmony.Patch(Game.ResolveMethod(GameTokens.ControlStep),
                 prefix:new HarmonyMethod(typeof(Plugin).GetMethod("BeforeControlStep",BindingFlags.Static|BindingFlags.NonPublic)),
                 transpiler:new HarmonyMethod(typeof(ControllerAdapter).GetMethod(nameof(Transpile),BindingFlags.Static|BindingFlags.NonPublic)));
         }

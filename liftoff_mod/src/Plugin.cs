@@ -40,7 +40,7 @@ namespace GoProGeometry
                 patches=new Harmony("com.goprodrone.geometry");
                 ControllerAdapter.InstallPatch(patches);
                 patches.Patch(typeof(Propeller).GetMethod("ApplyControllerForceAtPropeller"),prefix:new HarmonyMethod(typeof(Plugin).GetMethod(nameof(ObserveForce),BindingFlags.NonPublic|BindingFlags.Static)));
-                Logger.LogInfo("Geometry Lab ready; Liftoff 1.7.5 Mac. Stock physics selected until Apply.");
+                Logger.LogInfo("Geometry Lab ready; "+GameTokens.Game+". Stock physics selected until Apply.");
             }
             catch(Exception e) { patches?.UnpatchSelf(); patches=null; Fail(e); }
         }

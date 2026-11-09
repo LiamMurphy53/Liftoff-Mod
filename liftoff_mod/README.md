@@ -11,7 +11,7 @@ This is a working development prototype, not a calibrated simulation of the fini
 ### 1. Prepare the Mac
 
 - Install your own copy of **Liftoff through Steam**. Launch it normally once, then quit the game. Keep Steam open and signed in.
-- The supported game is **Liftoff 1.7.5 Mac, Steam build 25118475**. The mod checks the exact game assembly, not just the displayed version. A different build disables the mod until its compatibility is checked; rebuilding alone does not make a newer game compatible.
+- The supported game is **Liftoff 1.7.6 Mac, Steam build 25599583**. The mod checks the exact game assembly, not just the displayed version. A different build disables the mod until its compatibility is checked; rebuilding alone does not make a newer game compatible.
 - Install **Python 3** if needed, using the [official macOS installer](https://www.python.org/downloads/macos/). In Terminal, `python3 --version` should report Python 3. Setup does not install Python for you.
 - On **Apple Silicon**, the launcher needs Rosetta to run the game in Intel mode. Follow [Apple's Rosetta instructions](https://support.apple.com/en-ca/102527) if it is not available. An Intel Mac does not need Rosetta.
 - Keep an internet connection available for the first setup. The scripts download their own .NET SDK and BepInEx loader; you do not need to install those separately.
@@ -140,7 +140,22 @@ The adapter replaces the final motor force/RPM outputs before Liftoff applies it
 
 ## Compatibility and validation
 
-Target inspected: **Liftoff 1.7.5 Mac**, Steam build **25118475**, Unity **2022.3.62f3**, game assembly MVID `a2543f11-0d93-4fe0-8ffd-ff5ded8253a3`. A version guard disables changes on other game assemblies instead of guessing at obfuscated internals. Do not remove that guard without inspecting and testing the new build.
+Target inspected: **Liftoff 1.7.6 Mac**, Steam build **25599583**, Unity **2022.3.62f3**, game assembly MVID `b268710e-07ea-4416-8783-dcbcddcadb82`. (Earlier versions of the mod targeted 1.7.5, build 25118475.) A version guard disables changes on other game assemblies instead of guessing at obfuscated internals. Do not remove that guard without inspecting and testing the new build.
+
+### Porting to a new Liftoff update
+
+Liftoff's code is obfuscated, and every update renumbers the internal members the mod hooks. The inspector finds them again by structure and regenerates `src/GameTokens.cs`, which also holds the version guard. Each match must be unique, or it stops with an error. Run this from `liftoff_mod` after the update:
+
+```sh
+export DOTNET_CLI_HOME="$PWD/.tools/cli-home"
+.tools/dotnet/dotnet build tools/Inspector/Inspector.csproj -c Release
+.tools/dotnet/dotnet tools/Inspector/bin/Release/net8.0/Inspector.dll \
+  ~/Library/Application\ Support/Steam/steamapps/common/Liftoff/Liftoff.app/Contents/Resources/Data/Managed/Assembly-CSharp.dll \
+  locate src/GameTokens.cs "Liftoff X.Y.Z Mac, Steam build NNNNNNNN"
+python3 tools/setup_mac.py --build-only
+```
+
+Then launch, confirm the plugin log says `Geometry Lab ready` with no errors, and apply the profile in Free Flight before trusting the port. If the locator fails, the game changed shape, not just numbering: inspect it by hand.
 
 Validated during development:
 
@@ -169,4 +184,4 @@ If startup stalls, check Steam is signed in and focus the Liftoff window. If the
 - [Microsoft .NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0), pinned to 8.0.425.
 - Unity/Liftoff assemblies referenced from the owner's installed game; **not redistributed**.
 
-`tools/Inspector` is an optional read-only Mono.Cecil developer utility for finding force-related call sites. Proprietary inspection output, logs, downloads, compiled binaries, and active profiles are ignored by Git. Only our adapter, math, tests, launcher, profile, and documentation belong in the repository.
+`tools/Inspector` is an optional read-only Mono.Cecil developer utility for finding force-related call sites and, with `locate`, regenerating the game hooks after an update. Proprietary inspection output, logs, downloads, compiled binaries, and active profiles are ignored by Git. Only our adapter, math, tests, launcher, profile, and documentation belong in the repository.

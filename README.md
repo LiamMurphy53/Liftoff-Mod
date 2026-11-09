@@ -2,7 +2,7 @@
 
 ## Install the Liftoff GoPro Drone mod
 
-**macOS only for now. Windows installation is not supported yet.** Tested with Liftoff **1.7.5 Mac, Steam build 25118475**; the mod refuses other game assemblies until their compatibility is checked.
+**macOS only for now. Windows installation is not supported yet.** Tested with Liftoff **1.7.6 Mac, Steam build 25599583**; the mod refuses other game assemblies until their compatibility is checked.
 
 1. Install Liftoff through Steam and run it normally once. Install **Python 3** if needed and ensure **Rosetta** is available on Apple Silicon. Keep Steam open and signed in, then quit Liftoff.
 2. Download this repository with **Code → Download ZIP** and unzip it, or clone it with Git.
