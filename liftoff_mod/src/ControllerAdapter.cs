@@ -21,6 +21,12 @@ namespace GoProGeometry
             Gains=Field(GameTokens.PidGains), Integral=Field(GameTokens.PidIntegral);
         static readonly ConstructorInfo PidConstructor=(ConstructorInfo)Game.ResolveMethod(GameTokens.PidConstructor);
         internal static readonly MethodInfo Calculate=(MethodInfo)Game.ResolveMethod(GameTokens.PidCalculate);
+        static readonly FieldInfo PropulsionOwner=Field(GameTokens.PropulsionOwner);
+        static readonly MethodInfo PropulsionGetter=(MethodInfo)Game.ResolveMethod(GameTokens.PropulsionGetter),
+            MaxThrust=(MethodInfo)Game.ResolveMethod(GameTokens.MaxThrust);
+        readonly ThrustCurve curve;
+        readonly object[] thrustArgs=new object[2];
+        object propulsion;
         readonly Component controller;
         readonly MotorAllocator allocator;
         readonly IDictionary original, adapted;
@@ -29,11 +35,14 @@ namespace GoProGeometry
         float pitchIntegral,rollIntegral;
         bool mixedPreviousStep;
         internal int MixCalls { get; private set; }
+        internal float LastThrottle { get; private set; }
+        internal float[] LastForces { get; private set; }=new float[4];
         internal string Report { get; }
 
         internal ControllerAdapter(Component controller,GeometryProfile profile,Vector3 originalBodyInertia)
         {
             this.controller=controller; allocator=MotorAllocator.FromProfile(profile);
+            curve=profile.HasThrustCurve?ThrustCurve.FromProfile(profile):null;
             original=(IDictionary)Pids.GetValue(controller);
             adapted=(IDictionary)Activator.CreateInstance(original.GetType());
             var tensor=GeometryMath.UnityTensor(profile.inertiaKgM2);
@@ -56,7 +65,8 @@ namespace GoProGeometry
             }
             pitchPid=adapted[TaitBryanAngle.PITCH]; rollPid=adapted[TaitBryanAngle.ROLL];
             Report="geometry mixer; hover shares FL/FR/RL/RR="+string.Join("/",allocator.HoverShares.Select(x=>(100*x).ToString("F2")))+
-                "%; inertia-scaled native "+(auto?"auto PI":"manual PID")+"; stock rates retained";
+                "%; inertia-scaled native "+(auto?"auto PI":"manual PID")+"; stock rates retained; "+
+                (curve!=null?"thrust curve "+profile.thrustN.Length+" points, "+(curve.Max/9.80665*1000).ToString("F0")+" g per motor at full throttle":"Liftoff propulsion");
         }
         internal void Install(Propeller[] orderedProps) {
             var nativeProps=controller.GetType().BaseType.GetFields(Plugin.Members).Single(f=>f.FieldType==typeof(List<Propeller>));
@@ -79,18 +89,42 @@ namespace GoProGeometry
             if(result.Length!=4) throw new InvalidOperationException("Unexpected controller output dimensions.");
             return result;
         }
-        internal void Mix(float maximum) {
+        // Liftoff's propeller model: static or in-flight thrust (N) of one motor at an RPM and axial inflow (m/s).
+        float Thrust(float rpm,float inflow) { thrustArgs[0]=rpm; thrustArgs[1]=inflow; return (float)MaxThrust.Invoke(propulsion,thrustArgs); }
+        internal void Mix(float maximum,float inflow) {
             Verify();
-            if(!(maximum>0) || float.IsInfinity(maximum)) throw new InvalidOperationException("Invalid motor thrust limit.");
+            if(!(maximum>0) || float.IsInfinity(maximum) || float.IsNaN(inflow)) throw new InvalidOperationException("Invalid motor thrust limit.");
             var demand=Values(Outputs,controller); var motor=Values(Forces,controller); var rpm=Values(Rpm,controller);
             float collective=motor.Sum();
             float idle=((ZetaFlightControllerSettings)Settings.GetValue(controller)).idleMotorThrottlePercentage;
             float maxRpm=(float)MaxRpm.GetValue(controller);
             bool reversed=(float)Sign.GetValue(controller)<0;
+            double low=idle*maximum, high=maximum, airspeed=1;
+            if(curve!=null) {
+                // Liftoff sets each motor to its propeller's thrust at throttle × max RPM. Read the throttle back
+                // out of that, then give the measured thrust at that throttle, keeping Liftoff's airspeed losses.
+                propulsion=PropulsionGetter.Invoke(PropulsionOwner.GetValue(controller),null);
+                float perMotor=Math.Abs(collective)/4, rpmLo=0, rpmHi=maxRpm;
+                if(perMotor>=maximum) rpmLo=maxRpm;
+                else for(int k=0;k<20;k++) { float mid=.5f*(rpmLo+rpmHi); if(Thrust(mid,inflow)<perMotor) rpmLo=mid; else rpmHi=mid; }
+                double throttle=rpmLo/maxRpm;
+                float still=Thrust(maxRpm,0);
+                airspeed=still>1e-4f?Math.Max(0,Math.Min(2,maximum/still)):1;
+                float atThrottle=Thrust((float)throttle*maxRpm,0);
+                double here=atThrottle>1e-3f?Math.Max(0,Math.Min(2,Thrust((float)throttle*maxRpm,inflow)/atThrottle)):airspeed;
+                low=curve.Thrust(idle)*airspeed; high=curve.Max*airspeed;
+                collective=(float)(4*curve.Thrust(throttle)*here*Math.Sign(collective==0?1:collective));
+                LastThrottle=(float)throttle;
+            }
             // Native pitch/roll outputs have the opposite sign to Unity physical moments.
-            double authority=allocator.Allocate(collective,-demand[0],-demand[2],reversed?-maximum:idle*maximum,reversed?-idle*maximum:maximum,forces);
+            double authority=allocator.Allocate(collective,-demand[0],-demand[2],reversed?-high:low,reversed?-low:high,forces);
             int[] slots={0,1,3,2}; // game's output vector swaps the rear motors
-            for(int i=0;i<4;i++) { motor[slots[i]]=(float)forces[i]; rpm[slots[i]]=(float)(forces[i]/maximum*maxRpm); }
+            for(int i=0;i<4;i++) {
+                motor[slots[i]]=(float)forces[i];
+                double command=curve!=null?curve.Throttle(Math.Abs(forces[i])/airspeed)*Math.Sign(forces[i]):forces[i]/maximum;
+                rpm[slots[i]]=(float)(command*maxRpm);
+            }
+            LastForces=forces.Select(f=>(float)f).ToArray();
             if(authority<.999999) {
                 StopWinding(pitchPid,pitchIntegral,demand[0]); StopWinding(rollPid,rollIntegral,demand[2]);
             }
@@ -114,14 +148,15 @@ namespace GoProGeometry
             // Match the first powered motor assignment, following both collective branches.
             var setter=typeof(Propeller).GetProperty("TargetRPM").GetSetMethod();
             var assignments=code.Select((instruction,index)=>(instruction,index)).Where(x=>x.instruction.Calls(setter)).ToArray();
-            if(assignments.Length!=5 || __originalMethod.GetMethodBody().LocalVariables[4].LocalType!=typeof(float))
+            var locals=__originalMethod.GetMethodBody().LocalVariables;
+            if(assignments.Length!=5 || locals[3].LocalType!=typeof(float) || locals[4].LocalType!=typeof(float))
                 throw new InvalidOperationException("Unsupported motor-output control path.");
             int end=assignments[1].index;
             int start=end;
             while(start>0 && !(code[start].opcode==OpCodes.Ldarg_0 && code[start+1].opcode==OpCodes.Ldfld &&
                 ((FieldInfo)code[start+1].operand).FieldType==typeof(List<Propeller>))) start--;
             if(start==0 || code[start+2].opcode!=OpCodes.Ldc_I4_0) throw new InvalidOperationException("Cannot locate powered motor boundary.");
-            var injected=new[]{new CodeInstruction(OpCodes.Ldarg_0),new CodeInstruction(OpCodes.Ldloc_S,(byte)4),
+            var injected=new[]{new CodeInstruction(OpCodes.Ldarg_0),new CodeInstruction(OpCodes.Ldloc_S,(byte)4),new CodeInstruction(OpCodes.Ldloc_3),
                 new CodeInstruction(OpCodes.Call,typeof(Plugin).GetMethod("MixControlStep",BindingFlags.Static|BindingFlags.NonPublic))};
             // BepInEx ships a framework Harmony; access label collections through reflection
             // to avoid mscorlib/netstandard Label type forwarding incompatibilities at build time.

@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Geometry Lab</title>
+<link rel="stylesheet" href="style.css">
+<script type="importmap">
+{ "imports": { "three": "./vendor/three/build/three.module.js", "three/addons/": "./vendor/three/examples/jsm/" } }
+</script>
+</head>
+<body>
+<header class="bar">
+  <div class="brand"><span class="mark"></span>Geometry Lab</div>
+  <input id="name" class="name" spellcheck="false" aria-label="Profile name">
+  <div class="spacer"></div>
+  <div id="link" class="link"><i></i><span>Connecting…</span></div>
+  <button id="restore" class="ghost" title="Put the stock Liftoff drone back">Stock</button>
+  <button id="save" class="ghost" title="Save the profile without applying it">Save</button>
+  <button id="apply" class="primary" title="Save and fly this profile">Apply to drone</button>
+</header>
+
+<main>
+  <section class="view" id="view">
+    <canvas id="canvas"></canvas>
+    <div id="labels"></div>
+    <div id="drop" class="drop">
+      <div class="drop-card">
+        <div class="drop-title">Drop a CAD model</div>
+        <div class="drop-sub">STL, OBJ, GLB or glTF. Onshape: right-click the part studio → Export.</div>
+        <label class="file">Choose file<input type="file" id="file" accept=".stl,.obj,.glb,.gltf"></label>
+      </div>
+    </div>
+    <div class="views">
+      <button data-view="iso">3D</button><button data-view="top">Top</button><button data-view="front">Front</button><button data-view="side">Side</button>
+    </div>
+    <div id="hint" class="hint" hidden></div>
+    <div class="legend">
+      <span><i class="sw motor"></i>Motors</span><span><i class="sw cg"></i>CG</span><span><i class="sw cam"></i>Camera</span><span><i class="sw fwd"></i>Front</span>
+    </div>
+  </section>
+
+  <aside class="panel">
+    <details open id="sec-model">
+      <summary><b>Model</b><em id="model-sum">No model</em></summary>
+      <div class="grid2">
+        <label>Units<select id="units"><option value="mm">mm</option><option value="cm">cm</option><option value="m">m</option><option value="in">in</option></select></label>
+        <label>Prop size<span class="unit-in"><input id="prop" type="number" step="0.1" min="1" max="15">in</span></label>
+        <label>Up axis<select id="up"></select></label>
+        <label>Forward axis<select id="forward"></select></label>
+      </div>
+      <p class="note" id="axis-note"></p>
+      <div class="row">
+        <label class="file small">Load model…<input type="file" id="file2" accept=".stl,.obj,.glb,.gltf"></label>
+        <button id="clear-model" class="ghost small">Remove</button>
+      </div>
+      <label class="check"><input type="checkbox" id="hide-stock"> Hide Liftoff's stock frame (keep motors and props)</label>
+      <label class="check"><input type="checkbox" id="tint"> One colour <input type="color" id="tint-color" value="#2b2f36"></label>
+    </details>
+
+    <details open id="sec-motors">
+      <summary><b>Motors</b><em id="motor-sum"></em></summary>
+      <p class="note">Click <b>Pick</b>, then click the top of the motor on the model. Tick <b>Rim</b> to click 3 points on the bell's edge and use the centre.</p>
+      <div class="pts" id="motors"></div>
+      <div class="row">
+        <label class="check"><input type="checkbox" id="rim"> Rim (3 clicks → centre)</label>
+        <button id="sort" class="ghost small" title="Relabel the four points as front-left, front-right, rear-left, rear-right">Auto-label</button>
+      </div>
+      <p class="error" id="motor-err" hidden></p>
+    </details>
+
+    <details open id="sec-mass">
+      <summary><b>Mass &amp; CG</b><em id="mass-sum"></em></summary>
+      <div class="grid2">
+        <label>Mass<span class="unit-in"><input id="mass" type="number" step="0.1" min="50" max="10000">g</span></label>
+      </div>
+      <div class="pts" id="cg"></div>
+      <p class="note">From your CAD mass properties, in the model's own coordinates. Onshape: Mass properties → Center of mass.</p>
+      <div class="inertia">
+        <div class="inertia-head"><span>Inertia about the CG</span><select id="iunit"><option>kg·m²</option><option>kg·mm²</option><option>g·mm²</option><option>lb·in²</option></select></div>
+        <div class="tensor" id="tensor"></div>
+      </div>
+    </details>
+
+    <details open id="sec-thrust">
+      <summary><b>Thrust</b><em id="thrust-sum"></em></summary>
+      <label class="check"><input type="checkbox" id="use-curve"> Use my measured thrust curve (one motor)</label>
+      <div id="thrust-body">
+        <canvas id="chart" height="190"></canvas>
+        <div class="stats" id="thrust-stats"></div>
+        <div class="row">
+          <label class="file small">Import thrust stand CSV…<input type="file" id="csv" accept=".csv,text/csv"></label>
+          <button id="add-row" class="ghost small">Add point</button>
+          <button id="extend" class="ghost small" title="Extend the last two points out to 100% throttle">Extend to 100%</button>
+        </div>
+        <table class="curve"><thead><tr><th>Throttle %</th><th>Thrust g</th><th></th></tr></thead><tbody id="rows"></tbody></table>
+        <p class="note">Smooth monotone interpolation between points. Liftoff's airspeed losses still apply on top.</p>
+      </div>
+      <p class="error" id="thrust-err" hidden></p>
+    </details>
+
+    <details open id="sec-camera">
+      <summary><b>FPV camera</b><em id="cam-sum"></em></summary>
+      <label class="check"><input type="checkbox" id="use-cam"> Place the camera from this model</label>
+      <div id="cam-body">
+        <div class="pts" id="camera"></div>
+        <label class="slider">Uptilt above flat<input type="range" id="tilt" min="-20" max="70" step="0.5"><span class="unit-in"><input id="tilt-n" type="number" step="0.5" min="-30" max="80">°</span></label>
+        <p class="note">Measured from the motor plane (flat when hovering level). Pick the front of the lens.</p>
+      </div>
+    </details>
+
+    <details id="sec-game">
+      <summary><b>In game</b><em id="game-sum"></em></summary>
+      <label class="check"><input type="checkbox" id="auto"> Re-apply after every reset</label>
+      <pre id="report" class="report"></pre>
+    </details>
+  </aside>
+</main>
+<div id="toast" class="toast" hidden></div>
+<script type="module" src="app.js"></script>
+</body>
+</html>

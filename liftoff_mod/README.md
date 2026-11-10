@@ -43,8 +43,8 @@ Run all commands in this guide from inside **liftoff_mod**. The repository conta
 
 4. Acknowledge Liftoff's external modifications notice. The game disables certain competitive features while mods are loaded; this mod does not alter that protection.
 5. Open **Single Player → Free Flight**, choose a four-motor drone using **ZetaFlight**, and leave it stopped on the ground. Acro is the intended test mode. A DJI FPV configuration has also passed the integration check, but the selected drone's propulsion and drag are still inherited.
-6. Open the editor with **F8** or its top-left button. Click **Apply GoPro Drone / edited geometry**. Apply installs the geometry, mass properties, motor balancing, and controller compensation together.
-7. Fly. The editor's **LIVE** message appears when the game applies forces through the modified motors; it confirms the mod is active, not real-world calibration.
+6. The **Geometry Lab** panel sits top left (**F8** hides it). Click **Apply** to fly the active profile, or **Open drone editor** to set up your own drone in the browser (see [The drone editor](#the-drone-editor)). Apply installs the geometry, mass properties, motor balancing, thrust curve, camera and CAD body together.
+7. Fly. The panel's status turns green (**LIVE**) when the game applies forces through the modified motors; it confirms the mod is active, not real-world calibration.
 
 ### Subsequent launches and updates
 
@@ -56,7 +56,7 @@ python3 tools/setup_mac.py --build-only
 
 Quit and relaunch Liftoff to load the rebuilt plugin. If `.tools/` is missing (for example, you downloaded a fresh ZIP into a new folder), run setup without `--build-only`.
 
-**A drone reset returns to stock; click Apply again after each reset.** **Restore stock drone** returns the original geometry, mass properties, and controller. Press **F8** to hide the editor. With the editor open, **F9** applies and **F10** restores while stopped. Liftoff also uses F9 for its PID graph, so the on-screen Apply button avoids toggling that graph. On keyboards that use the top row for media controls, use **Fn/Globe + F8**, etc., as needed.
+**A drone reset returns to stock, then the mod applies your profile again once the drone is still** (turn off **Re-apply after resets** to stop that). **Stock** returns the original geometry, mass properties, controller, camera and frame. Press **F8** to hide the panel. With the panel open, **F9** applies and **F10** restores while stopped. Liftoff also uses F9 for its PID graph, so the on-screen Apply button avoids toggling that graph. On keyboards that use the top row for media controls, use **Fn/Globe + F8**, etc., as needed.
 
 To run without the mod, quit the game and launch Liftoff normally from Steam. No installed game files need to be removed.
 
@@ -93,22 +93,33 @@ python3 tools/setup_mac.py --build-only --game "/path/to/Liftoff.app"
 | Steam is starting | Sign in, leave Steam open, and run the mod launcher again. |
 | Unverified/unsupported Liftoff build | This game assembly needs a new compatibility check. Keep the version guard enabled; reinstalling dependencies does not resolve this. |
 | Apply unavailable or asks you to stop | Enter single-player Free Flight with a supported ZetaFlight quad, reset it, and let it settle before applying. |
-| No editor in Free Flight | Press F8; if it is still absent, check the plugin log below and confirm you used the mod launcher. |
+| No panel in Free Flight | Press F8; if it is still absent, check the plugin log below and confirm you used the mod launcher. |
+| Drone editor says "Liftoff not running" | The editor talks to the running game. Launch with the mod launcher, then reload the page. If port 8737 was taken, the plugin log names the port it used. |
 | Pocket sticks do not respond | Confirm the top data port and USB Joystick mode, check Liftoff's calibration, and reload Free Flight after reconnecting. |
 
 For a setup failure, keep the error text in the setup Terminal window. For a launch failure, check `runtime/launcher.log` and `runtime/player.log`. Plugin status and physics checks are in `.tools/bepinex/BepInEx/LogOutput.log`. These paths are all inside `liftoff_mod`.
 
-## Editing the drone
+## The drone editor
 
-The supplied `profiles/gopro-drone.json` imports the original model's 808.819 g mass, CAD motor coordinates, CG, and inertia from `flight_sim/config/aircraft.json`. It includes the off-diagonal inertia terms.
+**Open drone editor** in the panel opens `http://127.0.0.1:8737/` in your browser. The page is served by the plugin, only to this computer, and works while Liftoff is running. **Apply to drone** saves and flies the profile; **Save** only saves it; **Stock** puts the Liftoff drone back. The pill at the top shows whether the drone is bound, applied and live.
 
-The live editable copy is `.tools/bepinex/BepInEx/config/GoProGeometry/active.json`. The overlay opens its containing folder. **Save edits** saves there; **Reload profile JSON** reads it; **Apply** changes the current drone. Building does not overwrite an existing active profile. Copy a tuned profile into `profiles/` if you want to commit it.
+1. **Model.** Drop in an **STL, OBJ, GLB or glTF** (from Onshape: right-click the part studio or assembly → *Export*). Set the file's **units**, **up axis** and **forward axis** until the green arrow on the ground points out the front. The editor guesses millimetres for STL/OBJ and meters, +Y up for glTF. The model replaces Liftoff's stock frame in the game, unless you untick **Hide Liftoff's stock frame**; Liftoff's motors and props stay and move to your motor points. Use **One colour** to override the CAD colours.
+2. **Motors.** Click **Pick** next to a motor, then click the top of that motor on the model. With **Rim** ticked, click three points around the bell's edge and the centre is used. You can also type coordinates. **Auto-label** sorts the four points into front-left, front-right, rear-left and rear-right from the forward axis. The prop size only draws the prop discs.
+3. **Mass & CG.** Type the mass and centre of mass from your CAD mass properties, in the model's own coordinates and units (no conversion needed), or pick the CG on the model. Enter the inertia tensor about the CG, in the CAD axes, in any of the listed units.
+4. **Thrust.** Tick **Use my measured thrust curve** to replace Liftoff's propeller thrust with one motor's static thrust against throttle. **Import thrust stand CSV** reads the [thrust stand](https://github.com/LiamMurphy53/thrust-stand) sweep export (`throttle_pct`, `thrust_g`) or a raw log (binned per 1% throttle, median). You can also edit the table. The curve must reach 100% throttle; **Extend to 100%** extrapolates from the last two points if you didn't measure it. The chart shows the curve, the hover line (weight ÷ 4), hover throttle and thrust-to-weight.
+5. **FPV camera.** Tick **Place the camera from this model**, pick the front of the lens, and set the uptilt. Uptilt is measured from the motor plane, which is flat when the drone hovers level.
 
-The editor shows millimeters and grams. JSON uses meters, kilograms, and kg·m². Its motor array is flattened in **FL, FR, RL, RR** order, each with **X left, Y backward, Z up**. The inertia array is row-major, about the CG, in those same CAD axes.
+Every number in the editor is in the CAD file's coordinates. The profile itself (`active.json`) stores meters, kilograms and kg·m² in **X left, Y backward, Z up**, with motors in **FL, FR, RL, RR** order. The editor re-centres it on the motor centre; only positions relative to each other matter. The body mesh is saved beside it as `body.glmb`. Both live in `.tools/bepinex/BepInEx/config/GoProGeometry/`. Building does not overwrite an existing active profile. Copy a tuned profile into `profiles/` if you want to commit it.
 
-The adapter converts to Unity right/up/forward, aligns the average motor center to the stock drone's motor center, and shifts CG by the same offset. This preserves the physically relevant motor-to-CG vectors. Principal-axis decomposition converts the full inertia tensor into Unity's tensor plus rotation.
+The supplied `profiles/gopro-drone.json` imports the original model's 808.819 g mass, CAD motor coordinates, CG, and inertia from `flight_sim/config/aircraft.json`. It includes the off-diagonal inertia terms. It has no thrust curve, camera or body model, so Liftoff's propulsion and camera are kept until you add them.
+
+The adapter converts to Unity right/up/forward, aligns the average motor center to the stock drone's motor center, and shifts CG, camera and body by the same offset. This preserves the physically relevant motor-to-CG vectors. Principal-axis decomposition converts the full inertia tensor into Unity's tensor plus rotation.
 
 **Moving motors does not automatically recompute mass, CG, or inertia.** Update those from CAD when evaluating a changed frame. For a controlled comparison you can hold them fixed, but that isolates lever-arm effects rather than predicting the entire redesigned aircraft.
+
+### How the thrust curve is applied
+
+Liftoff sets each motor's RPM from the throttle stick (throttle × max RPM), then gets thrust from its propeller model at that RPM and the airspeed through the prop. With a thrust curve, the mod reads the throttle back out of Liftoff's collective. It then sets collective thrust to four times your measured thrust at that throttle, scaled by Liftoff's own ratio of in-flight to static thrust, so airspeed losses still apply. Each motor is limited between your curve's thrust at idle and at 100%. The allocator then balances pitch and roll around the real CG as before. The throttle percentages are treated as the same as the stick's throttle, which is how Betaflight's motor output relates to throttle in Acro before mixing.
 
 ## What it models—and what remains approximate
 
@@ -119,8 +130,11 @@ The adapter converts to Unity right/up/forward, aligns the average motor center 
 | Radio input and rates | Liftoff's selected ZetaFlight configuration; not real Betaflight firmware |
 | Pitch/roll mixer | Allocates bounded motor forces from actual motor-to-CG arms, with automatic hover balance |
 | Yaw | Liftoff's simplified direct yaw torque remains; allocator balances opposite spin pairs |
-| Thrust, motor response, prop model | Inherited from the stock Liftoff build you selected |
-| Body mesh, drag, collision geometry | Stock frame remains; motor/prop assemblies move, arms are not remodeled |
+| Thrust | Your measured static thrust curve when set (with Liftoff's airspeed losses); otherwise the stock propulsion |
+| Motor response, prop model | Inherited from the stock Liftoff build you selected |
+| FPV camera | Lens position and uptilt from the profile when set; otherwise Liftoff's |
+| Body mesh | Your CAD model when set, replacing the stock frame's look |
+| Drag, collision geometry | Still the stock frame's |
 | Controller gains | Native PID objects rebuilt with body-axis inertia scaling; auto mode adds bounded pitch/roll integral correction |
 | Windows | Source is portable C#, but loader setup and assembly compatibility remain untested |
 

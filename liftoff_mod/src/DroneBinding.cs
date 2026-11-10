@@ -27,6 +27,11 @@ namespace GoProGeometry
         Quaternion targetRotation;
         float targetMass;
         internal ControllerAdapter Control { get; private set; }
+        readonly FramePart frame;
+        readonly float stockCameraAngle;
+        GameObject bodyRoot;
+        readonly List<Renderer> hidden = new List<Renderer>();
+        string cameraReport = "Liftoff camera";
 
         internal static DroneBinding TryFind()
         {
@@ -71,9 +76,12 @@ namespace GoProGeometry
             if (motorRoots.Any(t=>!t) || motorRoots.Distinct().Count()!=4)
                 throw new InvalidOperationException("Cannot resolve four independent motor assemblies.");
             mass=Body.mass; cg=Body.centerOfMass; inertia=Body.inertiaTensor; inertiaRotation=Body.inertiaTensorRotation;
+            frame=body.GetComponentInChildren<FramePart>();
+            if (frame) { stockCameraAngle=frame.CameraAngle; if (frame.cameraPart) Remember(frame.cameraPart.transform); }
         }
         void Remember(Transform t) { if(t && !originalPositions.ContainsKey(t)) originalPositions.Add(t,t.localPosition); }
         Vector3 Point(Propeller p) => Body.transform.InverseTransformPoint(p.transform.position);
+        internal float StockMass => mass;
         internal bool IsAlive => Body && Controller && Props.All(p=>p);
         internal bool CanEdit => IsAlive && !Manager.IsResettingDrone && Body.velocity.sqrMagnitude<0.0625f && Body.angularVelocity.sqrMagnitude<0.25f;
         internal static bool IsOnline()
@@ -84,7 +92,7 @@ namespace GoProGeometry
             bool offline=(bool)type.GetProperty("OfflineMode",BindingFlags.Public|BindingFlags.Static).GetValue(null);
             return inRoom && !offline;
         }
-        internal void Apply(GeometryProfile p)
+        internal void Apply(GeometryProfile p, string folder)
         {
             p.Validate();
             if(!CanEdit) throw new InvalidOperationException("Reset and stop the drone before changing geometry.");
@@ -97,6 +105,9 @@ namespace GoProGeometry
             targetPoints=targets.Select(v=>v+offset).ToArray(); targetCg=Vector(GeometryMath.UnityPoint(p.centerOfMassM))+offset;
             targetInertia=Vector(eig.values); targetMass=p.massKg;
             targetRotation=Quaternion.LookRotation(Column(eig.rotation,2),Column(eig.rotation,1));
+            // Read the CAD body before changing anything, so a bad file leaves the stock drone untouched.
+            var parts=string.IsNullOrEmpty(p.bodyModel)?null:BodyModel.Read(System.IO.Path.Combine(folder,p.bodyModel));
+            if((parts!=null || p.cameraEnabled) && !frame) throw new InvalidOperationException("This drone has no frame part for the camera or CAD body.");
             try
             {
                 for(int i=0;i<4;i++)
@@ -114,6 +125,16 @@ namespace GoProGeometry
                     r.m00*r.m00*inertia.x+r.m01*r.m01*inertia.y+r.m02*r.m02*inertia.z,
                     r.m10*r.m10*inertia.x+r.m11*r.m11*inertia.y+r.m12*r.m12*inertia.z,
                     r.m20*r.m20*inertia.x+r.m21*r.m21*inertia.y+r.m22*r.m22*inertia.z);
+                if(p.cameraEnabled) PlaceCamera(Vector(GeometryMath.UnityPoint(p.cameraM))+offset,p.cameraUptiltDeg);
+                if(parts!=null)
+                {
+                    var stock=frame.rendererRoot?frame.rendererRoot.GetComponentsInChildren<Renderer>():new Renderer[0];
+                    bodyRoot=BodyModel.Attach(Body.transform,offset,parts,stock.Select(x=>x.sharedMaterial).FirstOrDefault(m=>m));
+                    if(p.hideStockFrame)
+                        foreach(var piece in stock)
+                            if(piece.enabled && !piece.GetComponentInParent<MotorPart>() && !piece.GetComponentInParent<PropellerPart>() && !piece.GetComponentInParent<CameraPart>())
+                            { piece.enabled=false; hidden.Add(piece); }
+                }
                 Control=new ControllerAdapter(Controller,p,stockBodyInertia); Control.Install(Props);
                 Applied=true; ForceCalls=0; ProfileName=p.name;
                 Verify();
@@ -130,16 +151,31 @@ namespace GoProGeometry
                Enumerable.Range(0,4).Any(i=>(Point(Props[i])-targetPoints[i]).magnitude>0.001f))
                 throw new InvalidOperationException("Liftoff changed geometry or mass properties; custom geometry has been disabled.");
         }
+        // Tilt first (the camera mount pivots), then move the mount so the FPV lens lands on the CAD point.
+        void PlaceCamera(Vector3 lens,float uptilt)
+        {
+            frame.CameraAngle=uptilt;
+            var mount=frame.cameraPart?frame.cameraPart.transform:null;
+            if(!mount) { cameraReport="uptilt "+uptilt.ToString("F1")+"°; no camera mount to move"; return; }
+            var view=Body.GetComponentsInChildren<Camera>(true).FirstOrDefault(c=>c.transform.IsChildOf(mount));
+            var from=view?view.transform.position:mount.position;
+            mount.position+=Body.transform.TransformPoint(lens)-from;
+            cameraReport="uptilt "+uptilt.ToString("F1")+"°; "+(view?"FPV lens":"camera mount")+" at "+Body.transform.InverseTransformPoint(view?view.transform.position:mount.position).ToString("F4");
+        }
         internal void Restore()
         {
             Applied=false; ForceCalls=0;
             Control?.Restore(); Control=null;
+            BodyModel.Destroy(bodyRoot); bodyRoot=null;
+            foreach(var r in hidden) if(r) r.enabled=true;
+            hidden.Clear(); cameraReport="Liftoff camera";
             if(!Body) return;
+            if(frame) frame.CameraAngle=stockCameraAngle;
             foreach(var pair in originalPositions) if(pair.Key) pair.Key.localPosition=pair.Value;
             Body.mass=mass; Body.centerOfMass=cg; Body.inertiaTensor=inertia; Body.inertiaTensorRotation=inertiaRotation;
         }
         internal string Report() => "mass="+Body.mass.ToString("F6")+" kg; CG="+Body.centerOfMass.ToString("F6")+"; principal inertia="+Body.inertiaTensor.ToString("F6")+
-            "; rotation="+Body.inertiaTensorRotation+"; controller="+(Control?.Report??"stock")+"\n"+string.Join("\n",Props.Select((p,i)=>new[]{"FL","FR","RL","RR"}[i]+"="+Point(p).ToString("F6")));
+            "; rotation="+Body.inertiaTensorRotation+"; controller="+(Control?.Report??"stock")+"; camera: "+cameraReport+"; body: "+(bodyRoot?"CAD model":"stock frame")+"\n"+string.Join("\n",Props.Select((p,i)=>new[]{"FL","FR","RL","RR"}[i]+"="+Point(p).ToString("F6")));
         static Vector3 Vector(double[] a)=>new Vector3((float)a[0],(float)a[1],(float)a[2]);
         static Vector3 Column(double[,] a,int j)=>new Vector3((float)a[0,j],(float)a[1,j],(float)a[2,j]);
     }

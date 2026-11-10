@@ -21,6 +21,16 @@ SDK_HASHES = {
     'x64': '3b27552358905f1bde600dd0315a23051ef1cbd055a50eb64c675ee25a04e658c2ed735177125436c5bec38dfcd958fee338299611348299cd34a9bea8b8011f',
 }
 BEP_VERSION = '5.4.23.5'
+# three.js for the drone editor's 3D view, pinned by hash (MIT licence; downloaded, not committed).
+THREE_VERSION = '0.160.0'
+THREE_FILES = {
+    'build/three.module.js': '76dea8151bc9352aef3528b4262e249b2604f62543828328db978d060d61a495',
+    'examples/jsm/controls/OrbitControls.js': '5a44a9e86a2a0fb11933eed69bc2cd33c76a496854c1aed6ed776efa87d7b064',
+    'examples/jsm/loaders/STLLoader.js': '896d006a48b8f125385a485ccae154dadee801a953f0b45ceffe7ddd8a29ca93',
+    'examples/jsm/loaders/OBJLoader.js': '022e0334f837c60506276e136faf3e54b21b20aea672eed4a0c50651d4fc0a5d',
+    'examples/jsm/loaders/GLTFLoader.js': 'd073b438e6a07e1359741dd5d6c76c953420cc0d4fd84eb1bdde94315540e6a3',
+    'examples/jsm/utils/BufferGeometryUtils.js': '9be041e96308775d00e2695cc607645b9a9b64fd7c0e759dd8f7c00a8d92becb',
+}
 BEP_HASH = '01c2ae782eb016dfd6c345a18dbd2dcafffb3d9d318449d6486689f426b4a323'
 
 def download(url, target, expected, algorithm):
@@ -60,9 +70,13 @@ def main():
         if not (local / 'bepinex/BepInEx/core/BepInEx.dll').is_file():
             with zipfile.ZipFile(bep_archive) as archive:
                 archive.extractall(local / 'bepinex')
+        for name, digest in THREE_FILES.items():
+            target = local / 'vendor/three' / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            download(f'https://cdn.jsdelivr.net/npm/three@{THREE_VERSION}/{name}', target, digest, 'sha256')
     dotnet = local / 'dotnet/dotnet'
     core = local / 'bepinex/BepInEx/core'
-    if not dotnet.is_file() or not (core / 'BepInEx.dll').is_file():
+    if not dotnet.is_file() or not (core / 'BepInEx.dll').is_file() or not all((local / 'vendor/three' / n).is_file() for n in THREE_FILES):
         parser.error('Local tools are missing. Run setup without --build-only.')
     env = os.environ.copy()
     env.update(DOTNET_CLI_HOME=str(local / 'cli-home'), DOTNET_CLI_TELEMETRY_OPTOUT='1',
@@ -82,7 +96,10 @@ def main():
     plugin.mkdir(parents=True, exist_ok=True)
     shutil.copy2(ROOT / 'bin/Release/netstandard2.1/GoProGeometry.dll', plugin)
     shutil.copytree(ROOT / 'profiles', plugin / 'profiles', dirs_exist_ok=True)
+    shutil.copytree(ROOT / 'editor', plugin / 'editor', dirs_exist_ok=True)
+    shutil.copytree(local / 'vendor/three', plugin / 'editor/vendor/three', dirs_exist_ok=True)
     print('\nGeometry Lab built and staged. Open Steam, then launch Liftoff Geometry Lab.command.')
+    print('In Free Flight, press "Open drone editor" (or browse to http://127.0.0.1:8737/).')
 
 if __name__ == '__main__':
     main()

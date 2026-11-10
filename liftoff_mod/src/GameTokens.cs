@@ -10,5 +10,6 @@ namespace GoProGeometry
         internal const int Settings = 0x040024d6, Pids = 0x040024de, Outputs = 0x040024df, Forces = 0x040024e0, Rpm = 0x040024e1;
         internal const int Sign = 0x040024e3, MaxRpm = 0x040024e4, Storage = 0x04001a80;
         internal const int PidGains = 0x040009ab, PidIntegral = 0x040009ae, PidConstructor = 0x06000e23, PidCalculate = 0x06000e22;
+        internal const int PropulsionOwner = 0x040024d2, PropulsionGetter = 0x06003bf8, MaxThrust = 0x060018b8;
     }
 }

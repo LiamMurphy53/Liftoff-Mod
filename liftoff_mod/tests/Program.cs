@@ -68,3 +68,25 @@ for(int i=0;i<1000;i++) {
     if(!f.All(x=>x>=.24 && x<=6) || Math.Abs(m.pitch-pitch*scale)+Math.Abs(m.roll-roll*scale)>1e-8) throw new Exception("allocation sweep failed");
 }
 Check(true,"1000 mixed throttle/attitude requests preserve bounded physical moments");
+
+// Thrust curve (schema 2): a thrust-stand sweep of one motor, in newtons.
+float[] sweepThrottle={.1f,.2f,.3f,.4f,.5f,.6f,.7f,.8f,.9f,1f};
+float[] sweepThrust={.18f,.55f,1.1f,1.9f,2.9f,4.0f,5.3f,6.6f,8.0f,9.4f};
+var curve=new ThrustCurve(sweepThrottle,sweepThrust);
+Check(Enumerable.Range(0,10).All(i=>Math.Abs(curve.Thrust(sweepThrottle[i])-sweepThrust[i])<1e-6),"thrust curve passes through every measured point");
+Check(Math.Abs(curve.Thrust(0))<1e-9 && Math.Abs(curve.Max-9.4)<1e-5,"thrust curve starts from zero and tops out at the 100% measurement");
+bool monotone=true; double last=-1;
+for(int i=0;i<=1000;i++) { double t=curve.Thrust(i/1000.0); monotone&=t>=last-1e-12; last=t; }
+Check(monotone,"interpolated thrust never dips between measured points");
+double mid=curve.Thrust(.45);
+Check(mid>1.9 && mid<2.9,"interpolates between neighbouring points ("+mid.ToString("F3")+" N at 45%)");
+Check(Enumerable.Range(1,99).All(i=>Math.Abs(curve.Thrust(curve.Throttle(curve.Thrust(i/100.0)))-curve.Thrust(i/100.0))<1e-5),"inverse curve recovers throttle for any thrust");
+var flat=new ThrustCurve(new[]{0f,.5f,.6f,1f},new[]{0f,3f,3f,5f});
+Check(Math.Abs(flat.Thrust(.55)-3)<1e-9,"flat stretches stay flat (no overshoot)");
+Reject(p=>{p.thrustThrottle=new[]{0f,.5f};p.thrustN=new[]{0f,3f};},"reject a thrust curve that stops before 100% throttle");
+Reject(p=>{p.thrustThrottle=new[]{0f,.6f,.5f,1f};p.thrustN=new[]{0f,2f,3f,5f};},"reject throttle points out of order");
+Reject(p=>{p.thrustThrottle=new[]{0f,.5f,1f};p.thrustN=new[]{0f,4f,3f};},"reject thrust that falls as throttle rises");
+Reject(p=>{p.cameraEnabled=true;p.cameraUptiltDeg=95;},"reject an impossible camera uptilt");
+Reject(p=>{p.bodyModel="../../outside.bin";},"reject a body model path outside the profile folder");
+var v1=Load(); v1.schema=1; v1.Validate();
+Check(!v1.HasThrustCurve && !v1.cameraEnabled,"schema 1 profiles still load and keep Liftoff's propulsion and camera");

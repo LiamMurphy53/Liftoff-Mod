@@ -36,8 +36,8 @@ static class Locator
         var code = step.Body.Instructions;
         var targetRpm = code.Where(i => Calls(i, "set_TargetRPM")).ToArray();
         if (targetRpm.Length != 5) throw new InvalidOperationException($"Control step sets TargetRPM {targetRpm.Length} times, expected 5.");
-        if (step.Body.Variables.Count <= 4 || step.Body.Variables[4].VariableType.FullName != "System.Single")
-            throw new InvalidOperationException("Control step local 4 (thrust limit) is no longer a float.");
+        if (step.Body.Variables.Count <= 4 || step.Body.Variables[4].VariableType.FullName != "System.Single" || step.Body.Variables[3].VariableType.FullName != "System.Single")
+            throw new InvalidOperationException("Control step locals 3 (inflow) and 4 (thrust limit) are no longer floats.");
 
         var settings = One(controller.Fields.Where(f => f.FieldType.Name == "ZetaFlightControllerSettings"), "settings field");
         var pids = One(controller.Fields.Where(f => f.FieldType is GenericInstanceType g &&
@@ -63,6 +63,19 @@ static class Locator
         if (Tok(forces) != Tok(outputs) + 1 || Tok(rpm) != Tok(outputs) + 2)
             throw new InvalidOperationException("Output, force and RPM vectors are no longer declared together.");
         var storage = One(rpm.FieldType.Resolve().Fields.Where(f => !f.IsStatic && f.FieldType.FullName == "System.Single[]"), "vector storage");
+
+        // Thrust limit: V_4 = propulsion().MaxThrust(maxRpm, inflow V_3). Liftoff's propeller model, used to
+        // read the throttle back out of its collective and to keep its airspeed losses under a custom thrust curve.
+        int limit = code.IndexOf(One(code.Where(i => i.OpCode == OpCodes.Stloc_S && ((VariableDefinition)i.Operand).Index == 4), "thrust limit store"));
+        if (!(code[limit - 1].OpCode == OpCodes.Callvirt && code[limit - 2].OpCode == OpCodes.Ldloc_3 &&
+              code[limit - 3].OpCode == OpCodes.Ldfld && FieldOf(code[limit - 3]) == maxRpm && code[limit - 5].OpCode == OpCodes.Callvirt &&
+              code[limit - 6].OpCode == OpCodes.Ldfld && code[limit - 7].OpCode == OpCodes.Ldarg_0))
+            throw new InvalidOperationException("Thrust limit is no longer computed from the propulsion model.");
+        var propulsionOwner = FieldOf(code[limit - 6]);
+        var propulsionGetter = ((MethodReference)code[limit - 5].Operand).Resolve();
+        var maxThrust = ((MethodReference)code[limit - 1].Operand).Resolve();
+        if (maxThrust.ReturnType.FullName != "System.Single" || maxThrust.Parameters.Count != 2 || maxThrust.Parameters.Any(p => p.ParameterType.FullName != "System.Single") || propulsionGetter.Parameters.Count != 0)
+            throw new InvalidOperationException("Propulsion thrust method changed shape.");
 
         // ZetaFlight's PID: implements the dictionary's interface with a (axis, gains, integral limit) constructor.
         var pid = One(types.Where(t => t.Interfaces.Any(i => i.InterfaceType.Resolve() == pidInterface) &&
@@ -96,6 +109,7 @@ static class Locator
                     internal const int Settings = {{Hex(settings)}}, Pids = {{Hex(pids)}}, Outputs = {{Hex(outputs)}}, Forces = {{Hex(forces)}}, Rpm = {{Hex(rpm)}};
                     internal const int Sign = {{Hex(sign)}}, MaxRpm = {{Hex(maxRpm)}}, Storage = {{Hex(storage)}};
                     internal const int PidGains = {{Hex(gains)}}, PidIntegral = {{Hex(integral)}}, PidConstructor = {{Hex(ctor)}}, PidCalculate = {{Hex(calculate)}};
+                    internal const int PropulsionOwner = {{Hex(propulsionOwner)}}, PropulsionGetter = {{Hex(propulsionGetter)}}, MaxThrust = {{Hex(maxThrust)}};
                 }
             }
 

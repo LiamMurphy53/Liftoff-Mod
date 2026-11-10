@@ -1,15 +1,20 @@
 using System;
-using System.Globalization;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading;
 using BepInEx;
+using BepInEx.Configuration;
 using HarmonyLib;
 using UnityEngine;
 
 namespace GoProGeometry
 {
-    [BepInPlugin("com.goprodrone.geometry", "GoPro Geometry Lab", "0.1.0")]
+    [BepInPlugin("com.goprodrone.geometry", "GoPro Geometry Lab", "0.2.0")]
     public class Plugin : BaseUnityPlugin
     {
         internal static readonly BindingFlags Members=BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance;
@@ -18,21 +23,27 @@ namespace GoProGeometry
         GeometryProfile profile;
         Harmony patches;
         FlightManager subscribedManager;
-        string lastError;
-        string profilePath, status="Open single-player Free Flight, then reset the drone.";
-        string[] motorText=new string[12], cgText=new string[3];
-        string massText;
-        bool visible=true;
+        EditorServer server;
+        ConfigEntry<bool> autoApply;
+        readonly ConcurrentQueue<Action> mainThread=new ConcurrentQueue<Action>();
+        string lastError, profilePath, folder, lastReport="";
+        string status="Open single-player Free Flight to bind the drone.";
+        bool visible=true, wantApplied, failed;
         float nextScan;
         int lastReportedCalls;
+
         void Awake()
         {
             Instance=this;
-            profilePath=Config.Bind("Geometry","ProfilePath",Path.Combine(Paths.ConfigPath,"GoProGeometry","active.json"),"Editable profile; meters and kg. Changes apply only with the Apply button.").Value;
+            profilePath=Config.Bind("Geometry","ProfilePath",Path.Combine(Paths.ConfigPath,"GoProGeometry","active.json"),"Editable profile; meters and kg. Changes apply only with Apply.").Value;
+            autoApply=Config.Bind("Geometry","ReapplyAfterReset",true,"Apply the profile again on its own after a drone reset, once the drone is still.");
+            int port=Config.Bind("Editor","Port",8737,"Local port for the drone editor (127.0.0.1 only; the next free port is used if taken).").Value;
+            folder=Path.GetDirectoryName(profilePath);
+            var pluginDir=Path.GetDirectoryName(Info.Location);
             try
             {
-                var shipped=Path.Combine(Path.GetDirectoryName(Info.Location),"profiles","gopro-drone.json");
-                if(!File.Exists(profilePath)) { Directory.CreateDirectory(Path.GetDirectoryName(profilePath)); File.Copy(shipped,profilePath); }
+                var shipped=Path.Combine(pluginDir,"profiles","gopro-drone.json");
+                if(!File.Exists(profilePath)) { Directory.CreateDirectory(folder); File.Copy(shipped,profilePath); }
                 LoadProfile();
                 if(typeof(FlightManager).Module.ModuleVersionId.ToString()!=DroneBinding.SupportedModule)
                     throw new InvalidOperationException("Unverified Liftoff build. Geometry changes are disabled.");
@@ -43,18 +54,26 @@ namespace GoProGeometry
                 Logger.LogInfo("Geometry Lab ready; "+GameTokens.Game+". Stock physics selected until Apply.");
             }
             catch(Exception e) { patches?.UnpatchSelf(); patches=null; Fail(e); }
+            try
+            {
+                server=new EditorServer(Path.Combine(pluginDir,"editor"),port,Api);
+                Logger.LogInfo("Drone editor at "+server.Url);
+            }
+            catch(Exception e) { Logger.LogError("Drone editor could not start: "+e); }
         }
+
         void Update()
         {
+            while(mainThread.TryDequeue(out var action)) action();
             if(Input.GetKeyDown(KeyCode.F8)) visible=!visible;
             if(visible && Input.GetKeyDown(KeyCode.F9) && profile!=null && drone!=null) Act(Apply);
-            if(visible && Input.GetKeyDown(KeyCode.F10) && drone!=null && drone.CanEdit) Act(()=>{drone.Restore();status="Stock geometry, mass properties and controller restored.";Logger.LogInfo("Restored stock drone:\n"+drone.Report());});
+            if(visible && Input.GetKeyDown(KeyCode.F10) && drone!=null && drone.CanEdit) Act(Restore);
             if(Time.realtimeSinceStartup<nextScan) return;
             nextScan=Time.realtimeSinceStartup+0.5f;
             try
             {
                 if(drone!=null && (!drone.IsAlive || drone.Manager.IsResettingDrone))
-                { drone.Restore(); drone=null; status="Drone reset. Apply your profile again when stopped."; }
+                { drone.Restore(); drone=null; status="Drone reset."; }
                 if(drone==null && patches!=null)
                 {
                     drone=DroneBinding.TryFind();
@@ -62,9 +81,11 @@ namespace GoProGeometry
                     {
                         if(subscribedManager) subscribedManager.onDroneResetStart-=BeforeReset;
                         subscribedManager=drone.Manager; subscribedManager.onDroneResetStart+=BeforeReset;
-                        Logger.LogInfo("Stock drone bound:\n"+drone.Report()); status="Stock drone ready. Reset/stop, then choose GoPro Drone.";
+                        Logger.LogInfo("Stock drone bound:\n"+drone.Report()); status=wantApplied&&autoApply.Value?"Drone reset. Re-applying when it's still…":"Stock drone ready. Apply when it's still.";
                     }
                 }
+                // After a reset, put the profile back once the drone has settled.
+                if(drone!=null && !drone.Applied && wantApplied && autoApply.Value && drone.CanEdit && !DroneBinding.IsOnline()) Apply();
                 if(drone!=null && drone.Applied)
                 {
                     if(DroneBinding.IsOnline()) throw new InvalidOperationException("Online session detected; custom geometry restored to stock.");
@@ -73,8 +94,9 @@ namespace GoProGeometry
                     lastReportedCalls=drone.ForceCalls;
                 }
             }
-            catch(Exception e) { if(drone!=null && drone.Applied) drone.Restore(); Fail(e); }
+            catch(Exception e) { if(drone!=null && drone.Applied) drone.Restore(); wantApplied=false; Fail(e); }
         }
+
         static void BeforeControlStep(Component __instance)
         {
             var d=Instance?.drone;
@@ -82,11 +104,11 @@ namespace GoProGeometry
                 try { d.Control.BeforeStep(); } catch(Exception e) { d.Restore(); Instance.Fail(e); }
             }
         }
-        static void MixControlStep(Component controller,float maximum)
+        static void MixControlStep(Component controller,float maximum,float inflow)
         {
             var d=Instance?.drone;
             if(d==null || !d.Applied || d.Controller!=controller) return;
-            try { d.Control.Mix(maximum); }
+            try { d.Control.Mix(maximum,inflow); }
             catch(Exception e) { d.Restore(); Instance.Fail(e); }
         }
         static void ObserveForce(Propeller __instance)
@@ -94,69 +116,200 @@ namespace GoProGeometry
             var d=Instance?.drone;
             if(d!=null && d.Applied && __instance.ShouldApplyForce && d.Props.Contains(__instance)) d.ForceCalls++;
         }
-        void BeforeReset()
-        {
-            drone?.Restore(); drone=null; status="Drone reset. Apply your profile again when stopped.";
-        }
-        void LoadProfile()
-        {
-            var p=JsonUtility.FromJson<GeometryProfile>(File.ReadAllText(profilePath)); p.Validate(); profile=p;
-            for(int i=0;i<12;i++) motorText[i]=(p.motorsM[i]*1000f).ToString("F3",CultureInfo.InvariantCulture);
-            for(int i=0;i<3;i++) cgText[i]=(p.centerOfMassM[i]*1000f).ToString("F3",CultureInfo.InvariantCulture);
-            massText=(p.massKg*1000f).ToString("F3",CultureInfo.InvariantCulture);
-        }
-        GeometryProfile Edited()
-        {
-            var p=JsonUtility.FromJson<GeometryProfile>(JsonUtility.ToJson(profile));
-            p.motorsM=motorText.Select(ParseMm).ToArray(); p.centerOfMassM=cgText.Select(ParseMm).ToArray(); p.massKg=ParseMm(massText); p.Validate(); return p;
-        }
-        static float ParseMm(string s)=>float.Parse(s,NumberStyles.Float,CultureInfo.InvariantCulture)/1000f;
+        void BeforeReset() { drone?.Restore(); drone=null; status="Drone reset."; }
+
+        void LoadProfile() { var p=JsonUtility.FromJson<GeometryProfile>(File.ReadAllText(profilePath)); p.Validate(); profile=p; }
         void Apply()
         {
-            var p=Edited(); drone.Apply(p); profile=p; lastReportedCalls=0;
-            status="GoPro geometry and controller applied. Ready to fly.";
-            Logger.LogInfo("Applied "+p.name+":\n"+drone.Report());
-            File.WriteAllText(Path.Combine(Path.GetDirectoryName(profilePath),"last-applied.txt"),DateTime.UtcNow.ToString("O")+"\n"+drone.Report());
+            if(drone==null) throw new InvalidOperationException("No drone yet. Open single-player Free Flight first.");
+            LoadProfile(); drone.Apply(profile,folder); lastReportedCalls=0; wantApplied=true; failed=false;
+            status=profile.name+" applied. Ready to fly.";
+            lastReport=drone.Report();
+            Logger.LogInfo("Applied "+profile.name+":\n"+lastReport);
+            File.WriteAllText(Path.Combine(folder,"last-applied.txt"),DateTime.UtcNow.ToString("O")+"\n"+lastReport);
+        }
+        void Restore()
+        {
+            wantApplied=false;
+            if(drone==null) return;
+            drone.Restore(); status="Stock Liftoff drone restored."; Logger.LogInfo("Restored stock drone:\n"+drone.Report());
         }
         void Act(Action action) { try { action(); } catch(Exception e) { Fail(e); } }
-        void Fail(Exception e) { status=e.Message; if(lastError!=e.Message) { Logger.LogError(e.ToString()); lastError=e.Message; } }
+        void Fail(Exception e) { status=e.Message; failed=true; if(lastError!=e.Message) { Logger.LogError(e.ToString()); lastError=e.Message; } }
+
+        // ---------------------------------------------------------------- editor API
+
+        [Serializable] class State
+        {
+            public string game, status, profileName, report, editorUrl;
+            public bool bound, canEdit, applied, live, failed, autoApply, wantApplied, compatible;
+            public int forceCalls, mixCalls;
+            public float throttle, stockMassKg;
+            public float[] forces=new float[4];
+        }
+        [Serializable] class Result { public bool ok; public string message, report; }
+
+        // Runs on the server thread; anything that touches the game runs on Unity's main thread.
+        Reply Api(string method,string path,Dictionary<string,string> query,byte[] body)
+        {
+            switch(method+" "+path)
+            {
+                case "GET /api/state": return OnMain(()=>Reply.Json(JsonUtility.ToJson(StateNow())));
+                case "GET /api/profile": return OnMain(()=>Reply.Json(File.ReadAllText(profilePath)));
+                case "PUT /api/profile": return OnMain(()=>{
+                    var p=JsonUtility.FromJson<GeometryProfile>(Encoding.UTF8.GetString(body));
+                    p.schema=2; p.Validate();
+                    if(!string.IsNullOrEmpty(p.bodyModel) && !File.Exists(Path.Combine(folder,p.bodyModel))) throw new ArgumentException("Body model "+p.bodyModel+" hasn't been uploaded.");
+                    File.WriteAllText(profilePath,JsonUtility.ToJson(p,true)); profile=p;
+                    return Ok("Saved "+p.name+".");
+                });
+                case "PUT /api/model": {
+                    var name=ModelName(query);
+                    if(body.Length>400_000_000) throw new ArgumentException("Body model is over 400 MB.");
+                    var temp=Path.Combine(folder,name+".upload");
+                    File.WriteAllBytes(temp,body);
+                    try { BodyModel.Read(temp); } catch { File.Delete(temp); throw; }
+                    var target=Path.Combine(folder,name);
+                    if(File.Exists(target)) File.Delete(target);
+                    File.Move(temp,target);
+                    return Ok("Uploaded "+name+" ("+(body.Length/1e6).ToString("F1")+" MB).");
+                }
+                case "GET /api/model": {
+                    var file=Path.Combine(folder,ModelName(query));
+                    return File.Exists(file)?Reply.Bytes(File.ReadAllBytes(file),"application/octet-stream"):Reply.Json("{\"ok\":false,\"message\":\"No such model.\"}",404);
+                }
+                case "POST /api/apply": return OnMain(()=>{ Apply(); return Ok(status); });
+                case "POST /api/restore": return OnMain(()=>{ Restore(); return Ok("Stock drone restored."); });
+                case "POST /api/autoapply": return OnMain(()=>{ autoApply.Value=query.TryGetValue("on",out var on) && on=="1"; return Ok(autoApply.Value?"Re-applies after resets.":"Won't re-apply after resets."); });
+            }
+            return Reply.Json("{\"ok\":false,\"message\":\"Unknown request.\"}",404);
+        }
+        static string ModelName(Dictionary<string,string> query)
+        {
+            if(!query.TryGetValue("name",out var name) || !Regex.IsMatch(name??"",@"^[A-Za-z0-9][A-Za-z0-9._-]{0,80}\.glmb$")) throw new ArgumentException("Model name must be letters, digits, ._- and end in .glmb.");
+            return name;
+        }
+        Reply Ok(string message) => Reply.Json(JsonUtility.ToJson(new Result{ok=true,message=message,report=lastReport}));
+        Reply OnMain(Func<Reply> work)
+        {
+            Reply reply=null; Exception error=null;
+            using(var done=new ManualResetEventSlim())
+            {
+                mainThread.Enqueue(()=>{ try { reply=work(); } catch(Exception e) { error=e; } finally { done.Set(); } });
+                if(!done.Wait(8000)) return Reply.Json("{\"ok\":false,\"message\":\"Liftoff didn't respond. Is the game paused in the background?\"}",503);
+            }
+            if(error!=null) { status=error.Message; failed=true; return Reply.Json(JsonUtility.ToJson(new Result{ok=false,message=error.Message,report=lastReport}),400); }
+            return reply;
+        }
+        State StateNow()
+        {
+            var s=new State{game=GameTokens.Game,status=status,profileName=profile?.name??"",report=drone!=null?drone.Report():"",editorUrl=server?.Url??"",
+                bound=drone!=null,canEdit=drone!=null&&drone.CanEdit,applied=drone!=null&&drone.Applied,failed=failed,autoApply=autoApply.Value,
+                wantApplied=wantApplied,compatible=patches!=null};
+            if(s.applied) { s.live=drone.ForceCalls>0; s.forceCalls=drone.ForceCalls; s.mixCalls=drone.Control.MixCalls; s.throttle=drone.Control.LastThrottle; s.forces=drone.Control.LastForces; }
+            if(drone!=null) s.stockMassKg=drone.StockMass;
+            return s;
+        }
+
+        // ---------------------------------------------------------------- in-game panel
+
+        GUIStyle card, title, heading, body, small, button, accent, pill, toggle;
+        Texture2D Fill(Color c) { var t=new Texture2D(1,1){hideFlags=HideFlags.HideAndDontSave}; t.SetPixel(0,0,c); t.Apply(); return t; }
+        void Styles()
+        {
+            if(card!=null) return;
+            card=new GUIStyle{normal={background=Fill(new Color(.07f,.08f,.10f,.88f))},padding=new RectOffset(18,18,14,16)};
+            title=new GUIStyle(GUI.skin.label){fontSize=11,fontStyle=FontStyle.Bold,normal={textColor=new Color(.55f,.62f,.70f)}};
+            heading=new GUIStyle(GUI.skin.label){fontSize=20,fontStyle=FontStyle.Bold,normal={textColor=Color.white},wordWrap=true};
+            body=new GUIStyle(GUI.skin.label){fontSize=13,richText=true,wordWrap=true,normal={textColor=new Color(.86f,.89f,.93f)}};
+            small=new GUIStyle(body){fontSize=11,normal={textColor=new Color(.55f,.62f,.70f)}};
+            button=new GUIStyle(GUI.skin.button){fontSize=13,fixedHeight=32,normal={background=Fill(new Color(.18f,.20f,.24f)),textColor=Color.white},
+                hover={background=Fill(new Color(.25f,.28f,.33f)),textColor=Color.white},active={background=Fill(new Color(.12f,.13f,.16f)),textColor=Color.white},
+                border=new RectOffset(0,0,0,0)};
+            accent=new GUIStyle(button){fontStyle=FontStyle.Bold,normal={background=Fill(new Color(.98f,.45f,.09f)),textColor=Color.white},
+                hover={background=Fill(new Color(1f,.55f,.2f)),textColor=Color.white},active={background=Fill(new Color(.85f,.38f,.06f)),textColor=Color.white}};
+            pill=new GUIStyle(button){fontSize=12,fixedHeight=28,alignment=TextAnchor.MiddleLeft,padding=new RectOffset(12,12,0,0),richText=true,
+                normal={background=Fill(new Color(.07f,.08f,.10f,.85f)),textColor=Color.white}};
+            toggle=new GUIStyle(GUI.skin.toggle){fontSize=12,normal={textColor=new Color(.86f,.89f,.93f)},onNormal={textColor=new Color(.86f,.89f,.93f)}};
+        }
+        string Dot(string colour) => "<color="+colour+">●</color>";
+        (string text,string colour) StatusLine()
+        {
+            if(patches==null) return ("Disabled on this Liftoff build","#f87171");
+            if(drone==null) return ("No drone. Open Free Flight","#94a3b8");
+            if(drone.Applied && drone.ForceCalls>0) return ("LIVE: "+profile?.name,"#4ade80");
+            if(drone.Applied) return ("Applied: arm to go live","#facc15");
+            return ("Stock Liftoff drone","#94a3b8");
+        }
         void OnGUI()
         {
             var matrix=GUI.matrix; bool enabled=GUI.enabled;
-            try { DrawGui(); }
+            try { Styles(); DrawGui(); }
             finally { GUI.matrix=matrix; GUI.enabled=enabled; }
         }
         void DrawGui()
         {
             float scale=Mathf.Max(1f,Screen.height/950f);
             GUI.matrix=Matrix4x4.Scale(new Vector3(scale,scale,1));
-            if(GUI.Button(new Rect(16,16,220,32),"GoPro Geometry Lab  •  F8")) visible=!visible;
-            if(!visible) return;
-            GUI.Box(new Rect(16,56,620,626),"GoPro Drone • experimental geometry lab");
-            GUI.Label(new Rect(32,88,590,38),"Free Flight only. Stop first. F9: apply. F10: restore stock.");
-            var applied=drone!=null && drone.Applied;
-            GUI.Label(new Rect(32,116,590,28),"Flying: "+(applied?drone.ProfileName+" geometry":"Stock Liftoff drone"));
-            GUI.enabled=profile!=null && drone!=null && drone.CanEdit;
-            if(GUI.Button(new Rect(32,149,274,34),"Apply GoPro Drone / edited geometry")) Act(Apply);
-            if(GUI.Button(new Rect(318,149,298,34),"Restore stock drone")) Act(()=>{drone.Restore();status="Stock geometry, mass properties and controller restored.";Logger.LogInfo("Restored stock drone:\n"+drone.Report());});
-            GUI.enabled=profile!=null;
-            GUI.Label(new Rect(32,195,590,24),"Motor centers (mm)      Left +X        Back +Y           Up +Z");
-            for(int row=0;row<4;row++)
+            var (line,colour)=StatusLine();
+            if(!visible)
             {
-                GUI.Label(new Rect(32,225+34*row,130,28),new[]{"Front left","Front right","Rear left","Rear right"}[row]);
-                for(int col=0;col<3;col++) { int i=3*row+col; motorText[i]=GUI.TextField(new Rect(176+142*col,225+34*row,130,28),motorText[i]??""); }
+                if(GUI.Button(new Rect(16,16,260,28),Dot(colour)+"  Geometry Lab · F8",pill)) visible=true;
+                return;
             }
-            GUI.Label(new Rect(32,372,130,28),"Mass (grams)"); massText=GUI.TextField(new Rect(176,372,130,28),massText??"");
-            GUI.Label(new Rect(32,409,130,28),"CG (mm X/Y/Z)");
-            for(int i=0;i<3;i++) cgText[i]=GUI.TextField(new Rect(176+142*i,409,130,28),cgText[i]??"");
-            GUI.Label(new Rect(32,448,586,46),"Inertia comes from the profile JSON and stays fixed when motors move.\nPropulsion, drag and frame collisions remain Liftoff's.");
-            if(GUI.Button(new Rect(32,504,178,30),"Save edits")) Act(()=>{var p=Edited();File.WriteAllText(profilePath,JsonUtility.ToJson(p,true));status="Profile saved. Press Apply to fly these values.";});
-            if(GUI.Button(new Rect(220,504,190,30),"Reload profile JSON")) Act(()=>{LoadProfile();status="Profile loaded. Press Apply to use it.";});
-            if(GUI.Button(new Rect(420,504,196,30),"Open profile folder")) Application.OpenURL(new Uri(Path.GetDirectoryName(profilePath)).AbsoluteUri);
+            GUILayout.BeginArea(new Rect(16,16,360,Screen.height/scale-32));
+            GUILayout.BeginVertical(card);
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("GEOMETRY LAB",title);
+            GUILayout.FlexibleSpace();
+            if(GUILayout.Button("Hide  F8",small)) visible=false;
+            GUILayout.EndHorizontal();
+            GUILayout.Label(profile?.name??"No profile",heading);
+            GUILayout.Label(Dot(colour)+"  "+line,body);
+            GUILayout.Space(6);
+            if(profile!=null)
+            {
+                var facts=new List<string>{(profile.massKg*1000).ToString("F0")+" g"};
+                if(profile.HasThrustCurve)
+                {
+                    var c=ThrustCurve.FromProfile(profile);
+                    facts.Add((c.Max/9.80665*1000).ToString("F0")+" g/motor");
+                    double hover=profile.massKg*9.80665/4;
+                    facts.Add(hover<c.Max?"hover "+(c.Throttle(hover)*100).ToString("F0")+"%":"can't hover");
+                }
+                else facts.Add("Liftoff thrust");
+                facts.Add(profile.cameraEnabled?"cam "+profile.cameraUptiltDeg.ToString("F0")+"°":"Liftoff cam");
+                if(!string.IsNullOrEmpty(profile.bodyModel)) facts.Add("CAD body");
+                GUILayout.Label(string.Join("  ·  ",facts),small);
+            }
+            if(drone!=null && drone.Applied && profile!=null && profile.HasThrustCurve && drone.Control.MixCalls>0)
+                GUILayout.Label("Throttle "+(drone.Control.LastThrottle*100).ToString("F0")+"%   motors "+string.Join(" ",drone.Control.LastForces.Select(f=>(f/9.80665*1000).ToString("F0")))+" g",small);
+            GUILayout.Space(10);
+            GUILayout.BeginHorizontal();
+            GUI.enabled=profile!=null && drone!=null && drone.CanEdit;
+            if(GUILayout.Button(drone!=null&&drone.Applied?"Re-apply  F9":"Apply  F9",accent)) Act(Apply);
+            GUI.enabled=drone!=null && drone.CanEdit;
+            if(GUILayout.Button("Stock  F10",button)) Act(Restore);
             GUI.enabled=true;
-            GUI.Label(new Rect(32,546,584,54),applied && drone.ForceCalls>0 ? "LIVE: "+drone.ForceCalls+" Liftoff motor-force calls observed at custom positions." : status);
-            GUI.Label(new Rect(32,612,584,52),"Geometry experiment, not a calibrated GoPro Drone model.\n"+(applied?"Geometry-aware mixer + controller active. Yaw remains simplified.":"Apply includes geometry-aware mixing and controller compensation."));
+            GUILayout.EndHorizontal();
+            GUILayout.Space(6);
+            GUI.enabled=server!=null;
+            if(GUILayout.Button("Open drone editor ↗",button)) Application.OpenURL(server.Url);
+            GUI.enabled=true;
+            GUILayout.Space(8);
+            bool auto=GUILayout.Toggle(autoApply.Value," Re-apply after resets",toggle);
+            if(auto!=autoApply.Value) autoApply.Value=auto;
+            GUILayout.Space(6);
+            GUILayout.Label(failed?"<color=#f87171>"+status+"</color>":status,small);
+            GUILayout.EndVertical();
+            GUILayout.EndArea();
         }
-        void OnDestroy() { if(subscribedManager) subscribedManager.onDroneResetStart-=BeforeReset; drone?.Restore(); patches?.UnpatchSelf(); if(Instance==this) Instance=null; }
+
+        void OnDestroy()
+        {
+            server?.Dispose();
+            if(subscribedManager) subscribedManager.onDroneResetStart-=BeforeReset;
+            drone?.Restore(); patches?.UnpatchSelf(); if(Instance==this) Instance=null;
+        }
     }
 }
