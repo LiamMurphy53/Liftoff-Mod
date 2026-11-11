@@ -11,5 +11,6 @@ namespace GoProGeometry
         internal const int Sign = 0x040024e3, MaxRpm = 0x040024e4, Storage = 0x04001a80;
         internal const int PidGains = 0x040009ab, PidIntegral = 0x040009ae, PidConstructor = 0x06000e23, PidCalculate = 0x06000e22;
         internal const int PropulsionOwner = 0x040024d2, PropulsionGetter = 0x06003bf8, MaxThrust = 0x060018b8;
+        internal const int DragHolder = 0x06003c02, DragAreas = 0x0600746e, DragAreasSetter = 0x0600746c, DragDirections = 0x040036d5, DragDirectionVector = 0x060005e0;
     }
 }

@@ -90,3 +90,25 @@ Reject(p=>{p.cameraEnabled=true;p.cameraUptiltDeg=95;},"reject an impossible cam
 Reject(p=>{p.bodyModel="../../outside.bin";},"reject a body model path outside the profile folder");
 var v1=Load(); v1.schema=1; v1.Validate();
 Check(!v1.HasThrustCurve && !v1.cameraEnabled,"schema 1 profiles still load and keep Liftoff's propulsion and camera");
+
+// Drag table: Cd·A against direction of travel, in profile axes (left, back, up).
+var cube=new System.Collections.Generic.List<float>(); var cda=new System.Collections.Generic.List<float>();
+double Box(double x,double y,double z)=>.004*Math.Abs(x)+.006*Math.Abs(y)+.012*Math.Abs(z); // side, front/back, top/bottom
+for(int i=-1;i<=1;i++)for(int j=-1;j<=1;j++)for(int k=-1;k<=1;k++) {
+    if(i==0&&j==0&&k==0) continue; double n=Math.Sqrt(i*i+j*j+k*k);
+    cube.AddRange(new[]{(float)(i/n),(float)(j/n),(float)(k/n)}); cda.Add((float)Box(i/n,j/n,k/n));
+}
+var drag=new DragTable(cube.ToArray(),cda.ToArray());
+Check(Math.Abs(drag.Area(0,-1,0)-.006)<1e-9 && Math.Abs(drag.Area(0,0,1)-.012)<1e-9,"drag table returns exact entries for listed directions");
+double between=drag.Area(0,-Math.Cos(.3),Math.Sin(.3));
+Check(between>.006 && between<.012,"drag blends between neighbouring directions ("+(between*1e4).ToString("F0")+" cm²)");
+Check(Math.Abs(drag.Area(0,-5,0)-.006)<1e-9,"drag lookup ignores the speed, only the direction");
+var unity=GeometryMath.UnityPoint(new[]{.1f,-.2f,.3f}); var back=GeometryMath.ProfileVector(unity[0],unity[1],unity[2]);
+Check(Math.Abs(back[0]-.1)+Math.Abs(back[1]+.2)+Math.Abs(back[2]-.3)<1e-6,"Liftoff drag directions convert back to profile axes");
+Reject(p=>{p.dragDirections=cube.ToArray();p.dragAreaM2=cda.Select(x=>-x).ToArray();},"reject negative drag areas");
+Reject(p=>{p.dragDirections=cube.Select(x=>x*2).ToArray();p.dragAreaM2=cda.ToArray();},"reject drag directions that aren't unit vectors");
+Reject(p=>{p.dragDirections=cube.ToArray();p.dragAreaM2=cda.Take(10).ToArray();},"reject a drag table with mismatched lengths");
+var front=Enumerable.Range(0,26).Where(i=>cube[3*i+1]<-.1f).ToArray();
+Reject(p=>{p.dragDirections=front.SelectMany(i=>new[]{cube[3*i],cube[3*i+1],cube[3*i+2]}).ToArray();p.dragAreaM2=front.Select(i=>cda[i]).ToArray();},"reject a drag table that only covers the front");
+var withDrag=Load(); withDrag.dragDirections=cube.ToArray(); withDrag.dragAreaM2=cda.ToArray(); withDrag.Validate();
+Check(withDrag.HasDragTable && !v1.HasDragTable,"profiles carry an optional drag table");

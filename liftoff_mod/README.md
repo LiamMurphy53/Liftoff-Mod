@@ -107,7 +107,17 @@ For a setup failure, keep the error text in the setup Terminal window. For a lau
 2. **Motors.** Click **Pick** next to a motor, then click the top of that motor on the model. With **Rim** ticked, click three points around the bell's edge and the centre is used. You can also type coordinates. **Auto-label** sorts the four points into front-left, front-right, rear-left and rear-right from the forward axis. The prop size only draws the prop discs.
 3. **Mass & CG.** Type the mass and centre of mass from your CAD mass properties, in the model's own coordinates and units (no conversion needed), or pick the CG on the model. Enter the inertia tensor about the CG, in the CAD axes, in any of the listed units.
 4. **Thrust.** Tick **Use my measured thrust curve** to replace Liftoff's propeller thrust with one motor's static thrust against throttle. **Import thrust stand CSV** reads the [thrust stand](https://github.com/LiamMurphy53/thrust-stand) sweep export (`throttle_pct`, `thrust_g`) or a raw log (binned per 1% throttle, median). You can also edit the table. The curve must reach 100% throttle; **Extend to 100%** extrapolates from the last two points if you didn't measure it. The chart shows the curve, the hover line (weight ÷ 4), hover throttle and thrust-to-weight.
-5. **FPV camera.** Tick **Place the camera from this model**, pick the front of the lens, and set the uptilt. Uptilt is measured from the motor plane, which is flat when the drone hovers level.
+5. **Drag.** Pick where the body drag comes from:
+   - **Liftoff** keeps the game's own drag.
+   - **CAD shape × Cd** measures your model's silhouette area from 162 directions and multiplies it by one drag coefficient. Quad bodies are about 1.0–1.3.
+   - **CFD runs** uses your OpenFOAM (or other CFD) results. Add one run per flow direction:
+     - **U** is the freestream velocity you set in `0/U`, in your CAD axes.
+     - **F** is the total force (pressure + viscous) from the `forces` function object.
+     - **Import force.dat or CSV** reads `postProcessing/<forces>/<time>/force.dat` or `forces.dat`. Both the OpenCFD column layout and the bracketed Foundation layout work. The force is averaged over the last fifth of the run, and a run that's still moving is flagged. You then type that run's U.
+     - A summary CSV with `name, ux, uy, uz, fx, fy, fz` columns imports many runs at once.
+
+   **Mirror left ↔ right** reuses each run for its mirror image. Between runs, the drag follows the model's silhouette, scaled to the drag coefficient your runs imply nearby. With no model loaded, it blends between the runs. The plot shows drag area against direction of travel from the side and from above, with Liftoff's current drag dashed for comparison. Pink arrows in the 3D view show each run's airflow, so a wrong axis is easy to spot.
+6. **FPV camera.** Tick **Place the camera from this model**, pick the front of the lens, and set the uptilt. Uptilt is measured from the motor plane, which is flat when the drone hovers level.
 
 Every number in the editor is in the CAD file's coordinates. The profile itself (`active.json`) stores meters, kilograms and kg·m² in **X left, Y backward, Z up**, with motors in **FL, FR, RL, RR** order. The editor re-centres it on the motor centre; only positions relative to each other matter. The body mesh is saved beside it as `body.glmb`. Both live in `.tools/bepinex/BepInEx/config/GoProGeometry/`. Building does not overwrite an existing active profile. Copy a tuned profile into `profiles/` if you want to commit it.
 
@@ -116,6 +126,22 @@ The supplied `profiles/gopro-drone.json` imports the original model's 808.819 g 
 The adapter converts to Unity right/up/forward, aligns the average motor center to the stock drone's motor center, and shifts CG, camera and body by the same offset. This preserves the physically relevant motor-to-CG vectors. Principal-axis decomposition converts the full inertia tensor into Unity's tensor plus rotation.
 
 **Moving motors does not automatically recompute mass, CG, or inertia.** Update those from CAD when evaluating a changed frame. For a controlled comparison you can hold them fixed, but that isolates lever-arm effects rather than predicting the entire redesigned aircraft.
+
+### How drag is applied
+
+Liftoff's body drag is ½ · 1.184 · Cd · A · v², applied against the drone's velocity through the air (wind is subtracted first). Cd is the frame's `DragCoefficient`. A is the drone's silhouette area, which Liftoff measures from 42 directions round the drone when it builds it. In flight, Liftoff blends the three nearest directions. Liftoff adds two more terms of its own:
+
+- drag on the spinning props from sideways airflow;
+- a small downward push.
+
+There's no lift, side force or moment from the body, and rotation is damped by Unity's angular drag rather than by aerodynamics.
+
+The mod keeps all of that and swaps only the area table. For each of Liftoff's 42 directions, it writes your Cd·A for that direction divided by the frame's Cd. Liftoff's force then equals your drag area exactly, with its wind and blending unchanged. Prop drag is still Liftoff's, so leave the props out of CFD models.
+
+When setting up CFD:
+- Rotate U rather than the model, and use freestream boundary conditions on the outer faces, so one mesh serves every direction.
+- One speed (15–25 m/s) is enough; a bluff body's Cd barely changes with speed.
+- A forward-flying quad is pitched nose-down, so in normal flight the air hits it **from the front and above**. Prioritise that sweep (0°, 15°, 30°, 45°, 60° above the motor plane), then straight above and below, the side, and a couple of diagonals.
 
 ### How the thrust curve is applied
 
@@ -134,11 +160,12 @@ Liftoff sets each motor's RPM from the throttle stick (throttle × max RPM), the
 | Motor response, prop model | Inherited from the stock Liftoff build you selected |
 | FPV camera | Lens position and uptilt from the profile when set; otherwise Liftoff's |
 | Body mesh | Your CAD model when set, replacing the stock frame's look |
-| Drag, collision geometry | Still the stock frame's |
+| Body drag | Your Cd·A against direction (CAD silhouette × Cd, or CFD runs) when set, through Liftoff's own drag; otherwise Liftoff's. Still drag-only: no body lift, side force or moment |
+| Collision geometry | Still the stock frame's |
 | Controller gains | Native PID objects rebuilt with body-axis inertia scaling; auto mode adds bounded pitch/roll integral correction |
 | Windows | Source is portable C#, but loader setup and assembly compatibility remain untested |
 
-The selected stock propulsion and the simplified controller can dominate handling. This version lets us establish whether custom geometry reaches the game's physics, and explore pitch/roll lever arms. It does **not** yet establish that real Betaflight on the GoPro Drone will behave the same way, especially near saturation or in yaw. Your motor/prop thrust data and real flight/blackbox comparisons are still needed for calibration. Real reaction-torque behavior and custom drag/collision geometry remain follow-up work.
+The selected stock propulsion and the simplified controller can dominate handling. This version lets us establish whether custom geometry reaches the game's physics, and explore pitch/roll lever arms. It does **not** yet establish that real Betaflight on the GoPro Drone will behave the same way, especially near saturation or in yaw. Your motor/prop thrust data and real flight/blackbox comparisons are still needed for calibration. Real reaction-torque behavior, body lift and moments from CFD, and custom collision geometry remain follow-up work.
 
 ## Apply now includes controller compensation
 

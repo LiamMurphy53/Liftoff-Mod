@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 
 namespace GoProGeometry
@@ -28,7 +29,13 @@ namespace GoProGeometry
         // Editor-only state (CAD import units/axes, file names). The plugin stores it untouched.
         public string editor = "";
 
+        // Body drag area Cd·A (m²) for directions of travel through the air (unit vectors, profile axes, xyz triples),
+        // built by the editor from CAD silhouettes and CFD runs. Empty keeps Liftoff's measured silhouette and frame Cd.
+        public float[] dragDirections = new float[0];
+        public float[] dragAreaM2 = new float[0];
+
         public bool HasThrustCurve => thrustThrottle != null && thrustThrottle.Length > 0;
+        public bool HasDragTable => dragAreaM2 != null && dragAreaM2.Length > 0;
 
         public void Validate()
         {
@@ -59,6 +66,7 @@ namespace GoProGeometry
                 if (d < 0.0004) throw new ArgumentException("Motor centers must be at least 20 mm apart.");
             }
             if (HasThrustCurve) ThrustCurve.FromProfile(this);
+            if (HasDragTable) DragTable.FromProfile(this);
             if (cameraEnabled)
             {
                 Check(cameraM, 3, "Camera position");
@@ -133,10 +141,68 @@ namespace GoProGeometry
         }
     }
 
+    // Drag area against direction of travel, blended like Liftoff's own table: the three nearest directions,
+    // weighted by inverse distance (an exact match wins outright).
+    public sealed class DragTable
+    {
+        readonly double[][] dirs;
+        readonly double[] areas;
+        public int Count => areas.Length;
+
+        public DragTable(float[] directions, float[] areaM2)
+        {
+            if (directions == null || areaM2 == null || directions.Length != 3 * areaM2.Length)
+                throw new ArgumentException("Drag table needs one direction (x, y, z) per drag area.");
+            if (areaM2.Length < 6 || areaM2.Length > 2000) throw new ArgumentException("Drag table needs 6–2000 directions.");
+            dirs = new double[areaM2.Length][]; areas = new double[areaM2.Length];
+            for (int i = 0; i < areaM2.Length; i++)
+            {
+                double x = directions[3 * i], y = directions[3 * i + 1], z = directions[3 * i + 2], n = Math.Sqrt(x * x + y * y + z * z);
+                if (double.IsNaN(n) || double.IsInfinity(n) || Math.Abs(n - 1) > 0.01) throw new ArgumentException("Drag directions must be unit vectors.");
+                float a = areaM2[i];
+                if (float.IsNaN(a) || float.IsInfinity(a) || a < 0 || a > 1) throw new ArgumentException("Drag areas (Cd·A) must be 0–1 m².");
+                dirs[i] = new[] { x / n, y / n, z / n }; areas[i] = a;
+            }
+            if (areas.Max() <= 0) throw new ArgumentException("Drag table has no drag.");
+            // Every travel direction needs a neighbour within 60°, or the blend would invent drag for it.
+            foreach (var probe in Sphere())
+                if (dirs.Max(d => d[0] * probe[0] + d[1] * probe[1] + d[2] * probe[2]) < 0.5)
+                    throw new ArgumentException("Drag table leaves directions uncovered; it needs entries all round the drone.");
+        }
+
+        public static DragTable FromProfile(GeometryProfile p) => new DragTable(p.dragDirections, p.dragAreaM2);
+
+        public double Area(double x, double y, double z)
+        {
+            double n = Math.Sqrt(x * x + y * y + z * z);
+            if (n < 1e-9) return 0;
+            x /= n; y /= n; z /= n;
+            var near = Enumerable.Range(0, areas.Length)
+                .Select(i => (i, d: Math.Sqrt(Math.Pow(dirs[i][0] - x, 2) + Math.Pow(dirs[i][1] - y, 2) + Math.Pow(dirs[i][2] - z, 2))))
+                .OrderBy(t => t.d).Take(3).ToArray();
+            if (near[0].d < 1e-3) return areas[near[0].i];
+            double w = 0, sum = 0;
+            foreach (var (i, d) in near) { w += 1 / d; sum += areas[i] / d; }
+            return sum / w;
+        }
+
+        // 26 probe directions: the cube's faces, edges and corners.
+        static IEnumerable<double[]> Sphere()
+        {
+            for (int a = -1; a <= 1; a++) for (int b = -1; b <= 1; b++) for (int c = -1; c <= 1; c++)
+            {
+                if (a == 0 && b == 0 && c == 0) continue;
+                double n = Math.Sqrt(a * a + b * b + c * c);
+                yield return new[] { a / n, b / n, c / n };
+            }
+        }
+    }
+
     public static class GeometryMath
     {
         // Unity body coordinates: right, up, forward. Tensor transform is A I A^T.
         public static double[] UnityPoint(float[] a, int offset = 0) => new double[] { -a[offset], a[offset+2], -a[offset+1] };
+        public static double[] ProfileVector(double right, double up, double forward) => new[] { -right, -forward, up };
         public static double[,] UnityTensor(float[] i)
         {
             int[] order = { 0, 2, 1 }; int[] sign = { -1, 1, -1 };

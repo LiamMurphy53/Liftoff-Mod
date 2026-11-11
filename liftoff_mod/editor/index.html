@@ -36,7 +36,7 @@
     </div>
     <div id="hint" class="hint" hidden></div>
     <div class="legend">
-      <span><i class="sw motor"></i>Motors</span><span><i class="sw cg"></i>CG</span><span><i class="sw cam"></i>Camera</span><span><i class="sw fwd"></i>Front</span>
+      <span><i class="sw motor"></i>Motors</span><span><i class="sw cg"></i>CG</span><span><i class="sw cam"></i>Camera</span><span><i class="sw fwd"></i>Front</span><span id="legend-air" hidden><i class="sw air"></i>CFD airflow</span>
     </div>
   </section>
 
@@ -97,6 +97,36 @@
         <p class="note">Smooth monotone interpolation between points. Liftoff's airspeed losses still apply on top.</p>
       </div>
       <p class="error" id="thrust-err" hidden></p>
+    </details>
+
+    <details open id="sec-drag">
+      <summary><b>Drag</b><em id="drag-sum"></em></summary>
+      <div class="seg" id="drag-mode" role="radiogroup" aria-label="Drag source">
+        <button data-mode="liftoff">Liftoff</button><button data-mode="cad">CAD shape × Cd</button><button data-mode="cfd">CFD runs</button>
+      </div>
+      <canvas id="drag-chart" height="170"></canvas>
+      <div class="chart-key"><span><i class="ln mine"></i>This profile</span><span><i class="ln stock"></i>Liftoff now</span><span id="key-runs"><i class="pt-dot"></i>CFD runs</span></div>
+      <div class="stats" id="drag-stats"></div>
+      <p class="note" id="drag-note"></p>
+      <div id="drag-cad">
+        <div class="grid2">
+          <label>Drag coefficient<span class="unit-in"><input id="cd" type="number" step="0.05" min="0.1" max="3">Cd</span></label>
+        </div>
+        <p class="note">Multiplies the model's silhouette area from every direction. Quad bodies are about 1.0–1.3. Props don't count: Liftoff adds prop drag separately.</p>
+      </div>
+      <div id="drag-cfd">
+        <p class="note">One run per flow direction, in your CAD axes. <b>U</b> is the freestream velocity from <code>0/U</code>; <b>F</b> is the total force (pressure + viscous) from the <code>forces</code> function object. Leave the props out of the CFD model.</p>
+        <div class="grid2">
+          <label>Air density (rhoInf)<span class="unit-in"><input id="rho" type="number" step="0.001" min="0.5" max="1.5">kg/m³</span></label>
+          <label class="check mirror-check"><input type="checkbox" id="mirror"> Mirror left ↔ right</label>
+        </div>
+        <div id="runs" class="runs"></div>
+        <div class="row">
+          <button id="add-run" class="ghost small">Add run</button>
+          <label class="file small" title="force.dat / forces.dat from postProcessing, or a CSV with ux,uy,uz,fx,fy,fz">Import force.dat or CSV…<input type="file" id="run-files" multiple accept=".dat,.csv,.txt,text/csv,text/plain"></label>
+        </div>
+      </div>
+      <p class="error" id="drag-err" hidden></p>
     </details>
 
     <details open id="sec-camera">

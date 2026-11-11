@@ -27,6 +27,10 @@ namespace GoProGeometry
         Quaternion targetRotation;
         float targetMass;
         internal ControllerAdapter Control { get; private set; }
+        DragAdapter drag;
+        // Liftoff's own drag table for this drone (profile axes, Cd·A m²), read before any change.
+        internal readonly float[] StockDragDirections=new float[0], StockDragArea=new float[0];
+        internal readonly float StockDragCd;
         readonly FramePart frame;
         readonly float stockCameraAngle;
         GameObject bodyRoot;
@@ -78,6 +82,9 @@ namespace GoProGeometry
             mass=Body.mass; cg=Body.centerOfMass; inertia=Body.inertiaTensor; inertiaRotation=Body.inertiaTensorRotation;
             frame=body.GetComponentInChildren<FramePart>();
             if (frame) { stockCameraAngle=frame.CameraAngle; if (frame.cameraPart) Remember(frame.cameraPart.transform); }
+            if (frame)
+                try { StockDragCd=frame.DragCoefficient; (StockDragDirections,StockDragArea)=DragAdapter.Read(controller,StockDragCd); }
+                catch (Exception e) { Plugin.Instance?.LogWarning("Drag table unavailable: "+e.Message); }
         }
         void Remember(Transform t) { if(t && !originalPositions.ContainsKey(t)) originalPositions.Add(t,t.localPosition); }
         Vector3 Point(Propeller p) => Body.transform.InverseTransformPoint(p.transform.position);
@@ -136,6 +143,11 @@ namespace GoProGeometry
                             { piece.enabled=false; hidden.Add(piece); }
                 }
                 Control=new ControllerAdapter(Controller,p,stockBodyInertia); Control.Install(Props);
+                if(p.HasDragTable)
+                {
+                    if(!frame) throw new InvalidOperationException("This drone has no frame part to read its drag coefficient from.");
+                    drag=new DragAdapter(Controller,p,frame.DragCoefficient); drag.Install();
+                }
                 Applied=true; ForceCalls=0; ProfileName=p.name;
                 Verify();
             }
@@ -144,7 +156,7 @@ namespace GoProGeometry
         internal void Verify()
         {
             if(!Applied) return;
-            Control.Verify();
+            Control.Verify(); drag?.Verify();
             if(!IsAlive || Math.Abs(Body.mass-targetMass)>1e-5f || (Body.centerOfMass-targetCg).magnitude>1e-5f ||
                (Body.inertiaTensor-targetInertia).magnitude>1e-6f || Quaternion.Angle(Body.inertiaTensorRotation,targetRotation)>0.1f ||
                // Large Liftoff maps lose sub-millimeter precision in world/local conversions.
@@ -166,6 +178,7 @@ namespace GoProGeometry
         {
             Applied=false; ForceCalls=0;
             Control?.Restore(); Control=null;
+            drag?.Restore(); drag=null;
             BodyModel.Destroy(bodyRoot); bodyRoot=null;
             foreach(var r in hidden) if(r) r.enabled=true;
             hidden.Clear(); cameraReport="Liftoff camera";
@@ -175,7 +188,7 @@ namespace GoProGeometry
             Body.mass=mass; Body.centerOfMass=cg; Body.inertiaTensor=inertia; Body.inertiaTensorRotation=inertiaRotation;
         }
         internal string Report() => "mass="+Body.mass.ToString("F6")+" kg; CG="+Body.centerOfMass.ToString("F6")+"; principal inertia="+Body.inertiaTensor.ToString("F6")+
-            "; rotation="+Body.inertiaTensorRotation+"; controller="+(Control?.Report??"stock")+"; camera: "+cameraReport+"; body: "+(bodyRoot?"CAD model":"stock frame")+"\n"+string.Join("\n",Props.Select((p,i)=>new[]{"FL","FR","RL","RR"}[i]+"="+Point(p).ToString("F6")));
+            "; rotation="+Body.inertiaTensorRotation+"; controller="+(Control?.Report??"stock")+"; camera: "+cameraReport+"; body: "+(bodyRoot?"CAD model":"stock frame")+"; "+(drag?.Report??"Liftoff drag")+"\n"+string.Join("\n",Props.Select((p,i)=>new[]{"FL","FR","RL","RR"}[i]+"="+Point(p).ToString("F6")));
         static Vector3 Vector(double[] a)=>new Vector3((float)a[0],(float)a[1],(float)a[2]);
         static Vector3 Column(double[,] a,int j)=>new Vector3((float)a[0,j],(float)a[1,j],(float)a[2,j]);
     }

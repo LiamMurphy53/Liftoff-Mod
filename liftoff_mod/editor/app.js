@@ -11,6 +11,7 @@ import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { DIRS, RHO, blend, shepard, median, silhouettes, runResult, describe, parseForces, parseRunsCsv, drawPolar } from './drag.js';
 
 const $ = id => document.getElementById(id);
 const G = 9.80665;
@@ -23,6 +24,9 @@ const MOTOR_NAMES = ['front-left', 'front-right', 'rear-left', 'rear-right'];
 const BODY_FILE = 'body.glmb';
 const MAX_VERTICES = 3_000_000;
 const DEFAULT_ED = { units: 'mm', up: '+Z', forward: '-Y', shift: [0, 0, 0], iunit: 'kg·m²', prop: 5, tint: false, tintColor: '#2b2f36', source: '' };
+// Drag source: Liftoff's own, the CAD silhouette times one Cd, or CFD runs ({name, u: CAD-axis m/s, f: CAD-axis N}).
+const DEFAULT_DRAG = { mode: 'liftoff', cd: 1.1, rho: RHO, mirror: true, runs: [] };
+const freshEd = (saved = {}) => ({ ...DEFAULT_ED, ...saved, drag: { ...DEFAULT_DRAG, runs: [], ...(saved.drag || {}) } });
 
 // ---------------------------------------------------------------- math
 
@@ -36,7 +40,7 @@ const scale = (a, k) => a.map(v => v * k);
 const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const norm = a => Math.hypot(...a);
 
-let ed = { ...DEFAULT_ED };
+let ed = freshEd();
 // Rows: the profile's left, back and up axes written in CAD coordinates.
 const basis = () => { const u = AXES[ed.up], f = AXES[ed.forward]; return [cross(u, f), scale(f, -1), u]; };
 const toProfile = p => add(scale(mul(basis(), p), UNIT[ed.units]), ed.shift);
@@ -86,7 +90,8 @@ function pchip(xs, ys) {
 // ---------------------------------------------------------------- state
 
 let profile = null;               // last profile from the plugin
-let parts = null;                 // [{geometry (CAD coords), color: THREE.Color}]
+let parts = null;                 // [{geometry (CAD coords), color: THREE.Color}], with a unique .id
+let partsSeq = 0;
 let baked = null;                 // settings baked into the uploaded body file (null: needs upload)
 const cad = { motors: [[60, -60, 0], [-60, -60, 0], [60, 60, 0], [-60, 60, 0]], cg: [0, 0, 20], camera: [0, -70, 20], inertia: [[0.003, 0, 0], [0, 0.003, 0], [0, 0, 0.005]] };
 let rows = [];                    // thrust curve: [{pct, g}]
@@ -165,7 +170,7 @@ function line(points, color, opacity = 1) {
 }
 function drawMarkers() {
   markers.clear(); $('labels').innerHTML = ''; labels.length = 0;
-  const { box, radius } = sceneSize();
+  const { box, radius, centre } = sceneSize();
   const s = Math.max(radius * 0.018, 0.002);
   hover.scale.setScalar(s * 0.6);
   const dot = (p, color, size = s) => { const m = new THREE.Mesh(new THREE.SphereGeometry(size, 20, 14), new THREE.MeshBasicMaterial({ color, depthTest: false })); m.position.copy(p); m.renderOrder = 5; markers.add(m); return m; };
@@ -198,6 +203,16 @@ function drawMarkers() {
   const arrow = new THREE.ArrowHelper(new THREE.Vector3(0, 0, -1), base, radius * 1.1, 0x4ade80, radius * 0.12, radius * 0.06);
   markers.add(arrow); tag('FRONT', 'fwd', base.clone().add(new THREE.Vector3(0, 0, -radius * 1.1)));
   grid.scale.setScalar(Math.max(radius * 3, 0.1)); grid.position.set(mid.x, box.min.y - radius * 0.002, mid.z);
+  // CFD runs: the airflow each one hits the drone with, so a wrong axis shows up at a glance.
+  const cfd = ed.drag.mode === 'cfd';
+  $('legend-air').style.display = cfd && ed.drag.runs.length ? '' : 'none';
+  if (cfd) ed.drag.runs.forEach((run, i) => {
+    const r = runResult(run, ed.drag.rho, dirToProfile);
+    if (r.problem) return;
+    const travel = new THREE.Vector3(...mul(VIEW, r.t)), from = centre.clone().addScaledVector(travel, radius * 1.75);
+    markers.add(new THREE.ArrowHelper(travel.clone().negate(), from, radius * 0.95, 0xf472b6, radius * 0.14, radius * 0.07));
+    tag(String(i + 1), 'air', from);
+  });
 }
 
 const projected = new THREE.Vector3();
@@ -289,7 +304,7 @@ async function loadFile(file) {
     if (ext === 'glb' || ext === 'gltf') { ed.units = 'm'; if (ed.up[1] !== 'Y') { ed.up = '+Y'; ed.forward = '+Z'; } }
     else if (span > 20 && ed.units === 'm') ed.units = 'mm';
     else if (span < 2 && ed.units === 'mm') ed.units = 'm';
-    parts = loaded; baked = null; ed.source = file.name;
+    parts = loaded; parts.id = ++partsSeq; baked = null; ed.source = file.name;
     syncImportControls(); showModel(); changed(); frame('iso');
     toast(`Loaded ${file.name}: ${(span).toFixed(span < 2 ? 3 : 0)} ${ed.units} across. Check the units and axes, then pick the motors.`, 'good');
   } catch (e) { toast(`Couldn't load ${file.name}: ${e.message}`, 'bad'); }
@@ -500,6 +515,144 @@ function syncSections() {
   $('mass-sum').textContent = `${(+$('mass').value || 0).toFixed(0)} g`;
 }
 
+// ---------------------------------------------------------------- drag
+
+const dirToProfile = v => mul(basis(), v);
+const cm2 = m2 => `${Math.round(m2 * 1e4)}`;
+const sil = { key: null, areas: null, pending: null };
+const silKey = () => parts ? `${parts.id}|${ed.units}|${ed.up}|${ed.forward}` : null;
+
+// Silhouette areas of the CAD model from every table direction, measured once per model and import setting.
+async function measure() {
+  const key = silKey();
+  if (!key || sil.pending === key || sil.key === key) return;
+  sil.pending = key;
+  $('drag-sum').textContent = 'Measuring…';
+  const k = UNIT[ed.units], A = basis().map(r => r.map(v => v * k));
+  const M = new THREE.Matrix4().set(A[0][0], A[0][1], A[0][2], 0, A[1][0], A[1][1], A[1][2], 0, A[2][0], A[2][1], A[2][2], 0, 0, 0, 0, 1);
+  try {
+    const areas = await silhouettes(renderer, parts, M, DIRS);
+    if (silKey() === key) { sil.key = key; sil.areas = areas; }
+  } catch (e) { toast(`Couldn't measure the model for drag: ${e.message}`, 'bad'); }
+  finally { if (sil.pending === key) sil.pending = null; refreshDrag(); }
+}
+
+// The drag this profile would fly: at(t) gives Cd·A (m²) for a direction of travel t in profile axes.
+function dragModel() {
+  const d = ed.drag, A = sil.key && sil.key === silKey() ? sil.areas : null;
+  if (d.mode === 'liftoff') return {};
+  if (d.mode === 'cad') {
+    if (!parts) return { problem: 'Load the CAD model so its silhouette can be measured, or use CFD runs.' };
+    if (!A) return { problem: 'Measuring the model…', waiting: true };
+    if (!(d.cd >= 0.1 && d.cd <= 3)) return { problem: 'Cd must be 0.1–3.' };
+    const cda = A.map(a => a * d.cd);
+    return { at: t => blend(DIRS, cda, t), cda };
+  }
+  const results = d.runs.map(r => runResult(r, d.rho, dirToProfile));
+  if (!(d.rho >= 0.5 && d.rho <= 1.5)) return { problem: 'Air density must be 0.5–1.5 kg/m³.', results };
+  const bad = results.findIndex(r => r.problem);
+  if (bad >= 0) return { problem: `Run ${bad + 1} (${d.runs[bad].name || 'unnamed'}): ${results[bad].problem}.`, results };
+  if (!results.length) return { problem: 'Add a CFD run, or import force.dat files.', results };
+  const points = results.flatMap(r => {
+    const out = [{ t: r.t, cda: r.cda }];
+    if (d.mirror && Math.abs(r.t[0]) > 0.02) out.push({ t: [-r.t[0], r.t[1], r.t[2]], cda: r.cda, mirror: true });
+    return out;
+  });
+  let at;
+  if (parts && !A) return { problem: 'Measuring the model…', waiting: true, results, points };
+  if (A) {
+    // Shape from the silhouette, size from the runs: blend each run's effective Cd over the sphere.
+    const area = t => blend(DIRS, A, t), cds = points.map(p => ({ t: p.t, v: p.cda / area(p.t) }));
+    const prior = median(cds.map(c => c.v));
+    at = t => shepard(cds, prior, t) * area(t);
+  } else {
+    const samples = points.map(p => ({ t: p.t, v: p.cda })), prior = median(samples.map(c => c.v));
+    at = t => shepard(samples, prior, t);
+  }
+  return { at, cda: DIRS.map(at), results, points };
+}
+
+let stockSig = '', stockTable = null;
+function stockDrag() {
+  if (!last || !last.stockDragArea || !last.stockDragArea.length) return null;
+  const sig = last.stockDragArea.join();
+  if (!stockTable || stockTable.sig !== sig) {
+    const f = last.stockDragDirections, dirs = [];
+    for (let i = 0; i < f.length; i += 3) dirs.push([f[i], f[i + 1], f[i + 2]]);
+    stockTable = { sig, at: t => blend(dirs, last.stockDragArea, t) };
+  }
+  return stockTable.at;
+}
+
+function refreshDrag() {
+  const d = ed.drag;
+  document.querySelectorAll('#drag-mode button').forEach(b => { b.classList.toggle('on', b.dataset.mode === d.mode); b.setAttribute('aria-checked', b.dataset.mode === d.mode); });
+  $('drag-cad').style.display = d.mode === 'cad' ? '' : 'none';
+  $('drag-cfd').style.display = d.mode === 'cfd' ? '' : 'none';
+  if (d.mode !== 'liftoff' && parts && sil.key !== silKey()) measure();
+  const m = dragModel(), stock = stockDrag();
+  drawPolar($('drag-chart'), [m.at && { at: m.at, colour: '#fb7a1c' }, stock && { at: stock, colour: '#8b95a3', dash: true }].filter(Boolean), d.mode === 'cfd' ? m.points || [] : []);
+  $('key-runs').style.display = d.mode === 'cfd' ? '' : 'none';
+  const dirs = [[[0, -1, 0], 'forward'], [[0, 0, 1], 'climbing'], [[1, 0, 0], 'sideways']];
+  const mine = m.at || (d.mode === 'liftoff' ? stock : null);
+  $('drag-stats').innerHTML = dirs.map(([t, label]) => `<div class="stat"><b>${mine ? cm2(mine(t)) + ' cm²' : '—'}</b><span>${label}${stock && d.mode !== 'liftoff' ? ` · Liftoff ${cm2(stock(t))}` : ''}</span></div>`).join('');
+  const cd = last && last.stockDragCd ? last.stockDragCd.toFixed(2) : null;
+  $('drag-note').textContent = {
+    liftoff: stock ? `Liftoff's own drag: the frame's Cd (${cd}) times the silhouette it measures of the stock drone, props included. Cd·A against the direction the drone is moving.` : 'Liftoff\'s own drag. Open Free Flight to see it for the current drone.',
+    cad: 'Cd·A against the direction the drone is moving through the air.',
+    cfd: parts ? 'Between runs, the drag follows the model\'s silhouette, scaled to match your runs.' : 'No model loaded, so the drag is blended between runs. Load the model to follow its shape between runs.',
+  }[d.mode];
+  const err = m.problem && !m.waiting;
+  $('drag-err').hidden = !err; $('drag-err').textContent = err ? m.problem : '';
+  $('drag-sum').textContent = d.mode === 'liftoff' ? 'Liftoff' : m.waiting ? 'Measuring…' : m.problem ? 'Needs fixing' : `${cm2(m.at([0, -1, 0]))} cm² forward`;
+  $('drag-sum').className = err ? 'bad' : '';
+  [...$('runs').children].forEach((el, i) => {
+    const r = m.results ? m.results[i] : runResult(d.runs[i], d.rho, dirToProfile);
+    el.classList.toggle('bad', !!r.problem);
+    el.querySelector('.run-out').innerHTML = r.problem ? r.problem : `Cd·A <b>${cm2(r.cda)} cm²</b> · air ${describe(r.t)} · ${r.v.toFixed(1)} m/s` + (r.rest > 0.15 * r.cda ? ` · side/lift ${cm2(r.rest)} cm²` : '');
+  });
+}
+
+function buildRuns() {
+  $('runs').replaceChildren(...ed.drag.runs.map((run, i) => {
+    const el = document.createElement('div'); el.className = 'run';
+    const vec = (v, label) => `<div class="run-vec"><span>${label}</span>${[0, 1, 2].map(k => `<input type="number" step="any" data-v="${v}" data-k="${k}" aria-label="${v.toUpperCase()}${'xyz'[k]}" placeholder="${v.toUpperCase()}${'xyz'[k]}">`).join('')}</div>`;
+    el.innerHTML = `<div class="run-head"><span class="who">${i + 1}</span><input class="run-name" aria-label="Run name"><button title="Remove run">×</button></div>${vec('u', 'U m/s')}${vec('f', 'F N')}<div class="run-out"></div>`;
+    const name = el.querySelector('.run-name'); name.value = run.name || '';
+    name.addEventListener('input', () => { run.name = name.value; dirty = true; refreshDrag(); });
+    el.querySelectorAll('[data-v]').forEach(inp => {
+      const v = run[inp.dataset.v][+inp.dataset.k];
+      inp.value = v === null || v === undefined || Number.isNaN(v) ? '' : +(+v).toPrecision(8);
+      inp.addEventListener('input', () => { const x = parseFloat(inp.value); run[inp.dataset.v][+inp.dataset.k] = Number.isFinite(x) ? x : null; dragChanged(); });
+    });
+    el.querySelector('.run-head button').addEventListener('click', () => { ed.drag.runs.splice(i, 1); buildRuns(); dragChanged(); });
+    return el;
+  }));
+  refreshDrag();
+}
+function dragChanged() { dirty = true; refreshDrag(); drawMarkers(); }
+
+async function importRuns(files) {
+  const added = [], notes = [];
+  for (const file of files) {
+    try {
+      const text = await file.text(), first = text.split(/\r?\n/).find(l => l.trim()) || '';
+      if (/\.csv$/i.test(file.name) || /\bux\b/i.test(first)) {
+        const runs = parseRunsCsv(text); added.push(...runs); notes.push(`${file.name}: ${runs.length} runs`);
+      } else {
+        const r = parseForces(text), taken = new Set([...ed.drag.runs, ...added].map(x => x.name));
+        let name = file.name; for (let n = 2; taken.has(name); n++) name = `${file.name} (${n})`;
+        added.push({ name, u: [null, null, null], f: r.f });
+        notes.push(`${name}: ${r.rows} rows` + (r.spread > 0.05 ? `, still moving ${(r.spread * 100).toFixed(0)}% at the end (converged?)` : ''));
+      }
+    } catch (e) { notes.push(`${file.name}: ${e.message}`); }
+  }
+  ed.drag.runs.push(...added); ed.drag.mode = 'cfd';
+  buildRuns(); dragChanged();
+  const needU = added.some(r => r.u.some(v => v === null));
+  toast(`Imported ${notes.join('; ')}.` + (needU ? ' Type each run\'s U (the freestream velocity) to finish.' : ''), added.length ? (needU ? '' : 'good') : 'bad');
+}
+
 // ---------------------------------------------------------------- validation
 
 function profileMotors() { return cad.motors.map(p => mul(basis(), p).map(v => v * UNIT[ed.units])); }
@@ -519,6 +672,7 @@ function validate() {
   const m = motorProblem(); if (m) issues.push(m);
   const mass = +$('mass').value; if (!(mass >= 50 && mass <= 10000)) issues.push('Mass must be 50–10000 g.');
   if ($('use-curve').checked) { const c = curveProblem(); if (c) issues.push(c); }
+  if (ed.drag.mode !== 'liftoff') { const dm = dragModel(); if (dm.problem) issues.push(dm.waiting ? 'Still measuring the model for drag. Try again in a moment.' : 'Drag: ' + dm.problem); }
   const I = profileInertia(), d = [I[0][0], I[1][1], I[2][2]];
   if (d.some(x => !(x > 0))) issues.push('Inertia diagonal (Ixx, Iyy, Izz) must be positive.');
   return issues;
@@ -533,6 +687,7 @@ function changed(redraw = true) {
   $('motor-sum').className = m ? 'bad' : '';
   syncSections();
   if (redraw) { buildPoints(); drawMarkers(); } else drawMarkers();
+  refreshDrag();
 }
 
 // ---------------------------------------------------------------- server
@@ -549,7 +704,7 @@ async function load() {
   const p = await call('GET', '/api/profile');
   profile = p;
   let saved = {}; try { saved = JSON.parse(p.editor || '{}'); } catch { }
-  ed = { ...DEFAULT_ED, ...saved };
+  ed = freshEd(saved);
   $('name').value = p.name;
   $('mass').value = +(p.massKg * 1000).toFixed(3);
   cad.motors = [0, 1, 2, 3].map(i => fromProfile(p.motorsM.slice(3 * i, 3 * i + 3)));
@@ -563,12 +718,13 @@ async function load() {
   cad.camera = p.cameraEnabled ? fromProfile(p.cameraM) : front;
   $('tilt').value = $('tilt-n').value = p.cameraUptiltDeg ?? 25;
   $('hide-stock').checked = p.hideStockFrame !== false;
+  $('cd').value = ed.drag.cd; $('rho').value = ed.drag.rho; $('mirror').checked = ed.drag.mirror;
   parts = null; baked = null;
   if (p.bodyModel) {
-    try { parts = importBody(await call('GET', `/api/model?name=${encodeURIComponent(p.bodyModel)}`)); baked = bakeKey(); }
+    try { parts = importBody(await call('GET', `/api/model?name=${encodeURIComponent(p.bodyModel)}`)); parts.id = ++partsSeq; baked = bakeKey(); }
     catch (e) { toast(`Couldn't load the saved body model: ${e.message}`, 'bad'); }
   }
-  syncImportControls(); showModel(); buildPoints(); buildTensor(); buildRows(); drawChart(); changed(); frame('iso');
+  syncImportControls(); showModel(); buildPoints(); buildTensor(); buildRows(); buildRuns(); drawChart(); changed(); frame('iso');
   dirty = false;
 }
 
@@ -587,6 +743,10 @@ function buildProfile() {
     thrustN: $('use-curve').checked ? rows.map(r => r.g / 1000 * G) : [],
     cameraEnabled: $('use-cam').checked, cameraM: flat(toProfile(cad.camera)), cameraUptiltDeg: +$('tilt-n').value,
     bodyModel: parts ? BODY_FILE : '', hideStockFrame: $('hide-stock').checked,
+    ...(() => {
+      const m = ed.drag.mode === 'liftoff' ? {} : dragModel();
+      return m.cda ? { dragDirections: DIRS.flat().map(v => +v.toPrecision(7)), dragAreaM2: m.cda.map(v => +v.toPrecision(6)) } : { dragDirections: [], dragAreaM2: [] };
+    })(),
     editor: JSON.stringify(ed),
   };
 }
@@ -620,6 +780,8 @@ async function poll() {
   try {
     const s = await call('GET', '/api/state');
     last = s;
+    const sig = (s.stockDragArea || []).join();
+    if (sig !== stockSig) { stockSig = sig; refreshDrag(); }
     const link = $('link');
     link.className = 'link ' + (!s.compatible ? 'bad' : s.live ? 'live' : s.applied ? 'applied' : '');
     link.querySelector('span').textContent = !s.compatible ? 'Disabled on this Liftoff build' : !s.bound ? 'No drone. Open Free Flight' : s.live ? `LIVE${s.throttle ? ` · throttle ${(s.throttle * 100).toFixed(0)}%` : ''}` : s.applied ? 'Applied: arm to go live' : 'Stock drone';
@@ -693,7 +855,13 @@ $('save').addEventListener('click', () => run('Saved', async () => { await save(
 $('apply').addEventListener('click', () => run('Applied', async () => { await save(); const r = await call('POST', '/api/apply'); return r.message; }));
 $('restore').addEventListener('click', () => run('Restored', async () => (await call('POST', '/api/restore')).message));
 addEventListener('beforeunload', e => { if (dirty) e.preventDefault(); });
-addEventListener('resize', drawChart);
+addEventListener('resize', () => { drawChart(); refreshDrag(); });
+document.querySelectorAll('#drag-mode button').forEach(b => b.addEventListener('click', () => { ed.drag.mode = b.dataset.mode; dragChanged(); }));
+$('cd').addEventListener('input', e => { ed.drag.cd = parseFloat(e.target.value); dragChanged(); });
+$('rho').addEventListener('input', e => { ed.drag.rho = parseFloat(e.target.value); dragChanged(); });
+$('mirror').addEventListener('change', e => { ed.drag.mirror = e.target.checked; dragChanged(); });
+$('add-run').addEventListener('click', () => { ed.drag.runs.push({ name: `run ${ed.drag.runs.length + 1}`, u: [null, null, null], f: [null, null, null] }); buildRuns(); dragChanged(); });
+$('run-files').addEventListener('change', e => { const files = [...e.target.files]; e.target.value = ''; if (files.length) importRuns(files); });
 
 resize(); loop();
 load().catch(e => toast(`Couldn't read the profile from Liftoff: ${e.message}`, 'bad'));

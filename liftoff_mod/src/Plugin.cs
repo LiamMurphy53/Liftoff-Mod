@@ -14,7 +14,7 @@ using UnityEngine;
 
 namespace GoProGeometry
 {
-    [BepInPlugin("com.goprodrone.geometry", "GoPro Geometry Lab", "0.2.0")]
+    [BepInPlugin("com.goprodrone.geometry", "GoPro Geometry Lab", "0.3.0")]
     public class Plugin : BaseUnityPlugin
     {
         internal static readonly BindingFlags Members=BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance;
@@ -134,6 +134,7 @@ namespace GoProGeometry
             if(drone==null) return;
             drone.Restore(); status="Stock Liftoff drone restored."; Logger.LogInfo("Restored stock drone:\n"+drone.Report());
         }
+        internal void LogWarning(string message) => Logger.LogWarning(message);
         void Act(Action action) { try { action(); } catch(Exception e) { Fail(e); } }
         void Fail(Exception e) { status=e.Message; failed=true; if(lastError!=e.Message) { Logger.LogError(e.ToString()); lastError=e.Message; } }
 
@@ -144,8 +145,8 @@ namespace GoProGeometry
             public string game, status, profileName, report, editorUrl;
             public bool bound, canEdit, applied, live, failed, autoApply, wantApplied, compatible;
             public int forceCalls, mixCalls;
-            public float throttle, stockMassKg;
-            public float[] forces=new float[4];
+            public float throttle, stockMassKg, stockDragCd;
+            public float[] forces=new float[4], stockDragDirections=new float[0], stockDragArea=new float[0];
         }
         [Serializable] class Result { public bool ok; public string message, report; }
 
@@ -207,7 +208,7 @@ namespace GoProGeometry
                 bound=drone!=null,canEdit=drone!=null&&drone.CanEdit,applied=drone!=null&&drone.Applied,failed=failed,autoApply=autoApply.Value,
                 wantApplied=wantApplied,compatible=patches!=null};
             if(s.applied) { s.live=drone.ForceCalls>0; s.forceCalls=drone.ForceCalls; s.mixCalls=drone.Control.MixCalls; s.throttle=drone.Control.LastThrottle; s.forces=drone.Control.LastForces; }
-            if(drone!=null) s.stockMassKg=drone.StockMass;
+            if(drone!=null) { s.stockMassKg=drone.StockMass; s.stockDragCd=drone.StockDragCd; s.stockDragDirections=drone.StockDragDirections; s.stockDragArea=drone.StockDragArea; }
             return s;
         }
 
@@ -241,6 +242,23 @@ namespace GoProGeometry
             if(drone.Applied) return ("Applied: arm to go live","#facc15");
             return ("Stock Liftoff drone","#94a3b8");
         }
+        GeometryProfile factsFor; string factsLine;
+        static string Facts(GeometryProfile p)
+        {
+            var facts=new List<string>{(p.massKg*1000).ToString("F0")+" g"};
+            if(p.HasThrustCurve)
+            {
+                var c=ThrustCurve.FromProfile(p);
+                facts.Add((c.Max/9.80665*1000).ToString("F0")+" g/motor");
+                double hover=p.massKg*9.80665/4;
+                facts.Add(hover<c.Max?"hover "+(c.Throttle(hover)*100).ToString("F0")+"%":"can't hover");
+            }
+            else facts.Add("Liftoff thrust");
+            facts.Add(p.cameraEnabled?"cam "+p.cameraUptiltDeg.ToString("F0")+"°":"Liftoff cam");
+            if(!string.IsNullOrEmpty(p.bodyModel)) facts.Add("CAD body");
+            if(p.HasDragTable) facts.Add("CdA "+(DragTable.FromProfile(p).Area(0,-1,0)*1e4).ToString("F0")+" cm²");
+            return string.Join("  ·  ",facts);
+        }
         void OnGUI()
         {
             var matrix=GUI.matrix; bool enabled=GUI.enabled;
@@ -269,18 +287,9 @@ namespace GoProGeometry
             GUILayout.Space(6);
             if(profile!=null)
             {
-                var facts=new List<string>{(profile.massKg*1000).ToString("F0")+" g"};
-                if(profile.HasThrustCurve)
-                {
-                    var c=ThrustCurve.FromProfile(profile);
-                    facts.Add((c.Max/9.80665*1000).ToString("F0")+" g/motor");
-                    double hover=profile.massKg*9.80665/4;
-                    facts.Add(hover<c.Max?"hover "+(c.Throttle(hover)*100).ToString("F0")+"%":"can't hover");
-                }
-                else facts.Add("Liftoff thrust");
-                facts.Add(profile.cameraEnabled?"cam "+profile.cameraUptiltDeg.ToString("F0")+"°":"Liftoff cam");
-                if(!string.IsNullOrEmpty(profile.bodyModel)) facts.Add("CAD body");
-                GUILayout.Label(string.Join("  ·  ",facts),small);
+                // The facts line validates curves and tables, so build it once per profile, not per GUI pass.
+                if(!ReferenceEquals(factsFor,profile)) { factsLine=Facts(profile); factsFor=profile; }
+                GUILayout.Label(factsLine,small);
             }
             if(drone!=null && drone.Applied && profile!=null && profile.HasThrustCurve && drone.Control.MixCalls>0)
                 GUILayout.Label("Throttle "+(drone.Control.LastThrottle*100).ToString("F0")+"%   motors "+string.Join(" ",drone.Control.LastForces.Select(f=>(f/9.80665*1000).ToString("F0")))+" g",small);

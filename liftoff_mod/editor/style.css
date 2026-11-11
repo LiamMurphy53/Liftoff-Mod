@@ -110,6 +110,34 @@ table.curve td input { padding: 4px 6px; font-size: 12px; }
 table.curve td button { border: 0; background: transparent; color: var(--dim); padding: 2px 8px; }
 table.curve td button:hover { color: var(--bad); }
 
+.seg { display: grid; grid-template-columns: repeat(3, 1fr); gap: 3px; padding: 3px; background: var(--bg); border: 1px solid var(--line); border-radius: 9px; margin-bottom: 10px; }
+.seg button { border: 0; background: transparent; color: var(--dim); padding: 6px 4px; font-size: 12px; border-radius: 6px; }
+.seg button:hover { color: var(--text); background: #ffffff0a; }
+.seg button.on { background: var(--panel2); color: var(--text); box-shadow: inset 0 0 0 1px #39414c; font-weight: 600; }
+#drag-chart { width: 100%; height: 170px; background: var(--bg); border: 1px solid var(--line); border-radius: 9px; }
+.chart-key { display: flex; gap: 14px; font-size: 11px; color: var(--dim); margin: 6px 2px 0; }
+.chart-key span { display: flex; align-items: center; gap: 5px; }
+.ln { width: 14px; height: 0; border-top: 2px solid var(--accent); display: inline-block; }
+.ln.stock { border-top: 1.5px dashed #8b95a3; }
+.pt-dot { width: 6px; height: 6px; border-radius: 50%; background: #fff; display: inline-block; }
+.mirror-check { align-self: end; margin: 0 0 6px; }
+code { font: 11.5px ui-monospace, "SF Mono", monospace; color: var(--text); background: var(--panel2); padding: 0 4px; border-radius: 4px; }
+.runs { display: grid; gap: 8px; margin-top: 4px; }
+.run { border: 1px solid var(--line); border-radius: 9px; padding: 8px 9px 9px; background: var(--panel2); }
+.run.bad { border-color: #f8717166; }
+.run-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.run-head input { flex: 1; min-width: 0; background: transparent; border: 1px solid transparent; padding: 2px 5px; font-weight: 600; font-size: 12px; }
+.run-head input:hover, .run-head input:focus { border-color: var(--line); background: var(--bg); outline: none; }
+.run-head button { border: 0; background: transparent; color: var(--dim); padding: 0 6px; font-size: 15px; }
+.run-head button:hover { color: var(--bad); }
+.run-vec { display: grid; grid-template-columns: 38px 1fr 1fr 1fr; gap: 5px; align-items: center; margin-top: 4px; }
+.run-vec span { color: var(--dim); font-size: 11px; }
+.run-vec input { padding: 4px 6px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.run-out { font-size: 11.5px; color: var(--dim); margin-top: 6px; }
+.run-out b { color: var(--text); font-variant-numeric: tabular-nums; }
+.run.bad .run-out { color: var(--bad); }
+.sw.air { background: #f472b6; } .tag.air { color: #f472b6; }
+
 .slider { display: grid; grid-template-columns: 1fr; gap: 6px; margin-top: 12px; }
 .slider input[type=range] { width: 100%; accent-color: var(--accent); }
 .slider .unit-in { width: 110px; }
