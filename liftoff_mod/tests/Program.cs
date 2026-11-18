@@ -25,8 +25,11 @@ Check(fl[0]<0 && fl[2]>0,"front-left stays front-left in Unity");
 var cg=GeometryMath.UnityPoint(profile.centerOfMassM);
 double[] moment=new double[3];
 for(int i=0;i<4;i++){var leverMoment=GeometryMath.Moment(GeometryMath.UnityPoint(profile.motorsM,i*3),cg,1);for(int k=0;k<3;k++)moment[k]+=leverMoment[k];}
-Check(Math.Abs(moment[0]-.073504)<1e-7,"deadcat equal-thrust pitch moment preserves CG offset");
-Check(Math.Abs(moment[2]-.000084)<1e-7,"small lateral CG offset is preserved");
+// Expected moments straight from the profile's own axes (left, back, up), independent of the Unity mapping.
+double backSum=0,leftSum=0;
+for(int i=0;i<4;i++){backSum+=profile.motorsM[3*i+1];leftSum+=profile.motorsM[3*i];}
+Check(Math.Abs(moment[0]-(backSum-4*profile.centerOfMassM[1]))<1e-6,"deadcat equal-thrust pitch moment preserves CG offset");
+Check(Math.Abs(moment[2]-(4*profile.centerOfMassM[0]-leftSum))<1e-6,"small lateral CG offset is preserved");
 var a=GeometryMath.Moment(new double[]{.1,0,0},new double[3],1);
 var b=GeometryMath.Moment(new double[]{.2,0,0},new double[3],1);
 Check(Math.Abs(b[2]-2*a[2])<1e-12,"doubling motor lever arm doubles moment");
@@ -47,7 +50,9 @@ double hover=profile.massKg*9.80665;
 mixer.Allocate(hover,0,0,0,6,f);
 var m=Moments(f);
 Check(Math.Abs(f.Sum()-hover)<1e-10 && Math.Abs(m.pitch)+Math.Abs(m.roll)<1e-12,"hover balances the actual CG without moving it");
-Check(Math.Abs((f[0]+f[1])/hover-.63768)<.0001,"front/rear hover split is approximately 64/36");
+double frontBack=(profile.motorsM[1]+profile.motorsM[4])/2,rearBack=(profile.motorsM[7]+profile.motorsM[10])/2;
+double frontShare=(rearBack-profile.centerOfMassM[1])/(rearBack-frontBack);
+Check(Math.Abs((f[0]+f[1])/hover-frontShare)<.0001,"front/rear hover split follows the CG ("+(frontShare*100).ToString("F1")+"% front)");
 mixer.Allocate(hover,.08,-.12,0,6,f);m=Moments(f);
 Check(Math.Abs(m.pitch-.08)+Math.Abs(m.roll+.12)<1e-10,"physical pitch/roll demands retain their sign and magnitude");
 mixer.Allocate(24,.08,-.12,.24,6,f);m=Moments(f);
@@ -88,7 +93,11 @@ Reject(p=>{p.thrustThrottle=new[]{0f,.6f,.5f,1f};p.thrustN=new[]{0f,2f,3f,5f};},
 Reject(p=>{p.thrustThrottle=new[]{0f,.5f,1f};p.thrustN=new[]{0f,4f,3f};},"reject thrust that falls as throttle rises");
 Reject(p=>{p.cameraEnabled=true;p.cameraUptiltDeg=95;},"reject an impossible camera uptilt");
 Reject(p=>{p.bodyModel="../../outside.bin";},"reject a body model path outside the profile folder");
-var v1=Load(); v1.schema=1; v1.Validate();
+// A schema 1 file has none of the schema 2 fields: rebuild one from this profile without them.
+var v1Json=System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+v1Json["schema"]=1;
+foreach(var key in new[]{"thrustThrottle","thrustN","cameraEnabled","cameraM","cameraUptiltDeg","bodyModel","hideStockFrame","editor"}) v1Json.Remove(key);
+var v1=JsonSerializer.Deserialize<GeometryProfile>(v1Json.ToJsonString(),new JsonSerializerOptions {IncludeFields=true})!; v1.Validate();
 Check(!v1.HasThrustCurve && !v1.cameraEnabled,"schema 1 profiles still load and keep Liftoff's propulsion and camera");
 
 // Drag table: Cd·A against direction of travel, in profile axes (left, back, up).
